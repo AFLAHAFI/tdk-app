@@ -1,8 +1,8 @@
 import { readdir, open, stat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 
-// The share of a project's text that TDK generated, so the model never had to write it. This is an estimate, not a billing figure:
-// tokens are approximated as bytes / 4, and only text files are counted.
+// The share of a project's text bytes that TDK generated. This is a size estimate, not a token count or a measure of savings:
+// tokens are approximated as bytes / 4, and only text files are counted. It says nothing about model usage.
 const SKIP_DIRS = new Set(["node_modules", ".git", ".next", "dist", "build", "target", "__pycache__", ".venv"]);
 const SKIP_FILES = new Set(["bun.lock", "bun.lockb", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "go.sum"]);
 const MAX_FILE_BYTES = 512 * 1024;
