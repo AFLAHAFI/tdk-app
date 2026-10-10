@@ -957,7 +957,7 @@ describe("persistent UI state (pins, hidden, collapsed)", () => {
     const { server } = await boot({ statePath: join(tempDir(), "state.json") });
     const response = await raw(server, { path: "/api/state" });
     assert.equal(response.status, 200);
-    assert.deepEqual(response.json, { pins: { projects: [], resources: [] }, hidden: [], collapsed: [], aiInspect: false });
+    assert.deepEqual(response.json, { pins: { projects: [], resources: [] }, hidden: [], collapsed: [], closedStacks: [], aiInspect: false });
   });
 
   it("keeps AI inspect off unless it is explicitly saved as true", async () => {

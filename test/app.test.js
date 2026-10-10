@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
-import { commonProjectScanRoots, discoverProjectRoot, discoverProjects, probeCli, resolveProjects, startAppServer } from "../src/app.js";
+import { commonProjectScanRoots, discoverProjectRoot, discoverProjects, normalizeState, probeCli, resolveProjects, startAppServer } from "../src/app.js";
 
 const servers = [];
 const tempDirs = [];
@@ -206,5 +206,12 @@ describe("TDK App local server", () => {
     assert.equal((await send({ project: "a", operation: "stop", stack: "shop" })).status, 400);
     assert.equal((await send({ project: "a", operation: "restart", resources: ["api"] })).status, 400);
     assert.equal(calls.length, 0);
+  });
+});
+
+describe("persistent UI state", () => {
+  it("keeps closed stacks across launches", () => {
+    const state = normalizeState({ closedStacks: ["proj/core", 42, "proj/jobs"] });
+    assert.deepEqual(state.closedStacks, ["proj/core", "proj/jobs"]);
   });
 });

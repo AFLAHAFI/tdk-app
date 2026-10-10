@@ -235,6 +235,7 @@ export function normalizeState(raw) {
     pins: { projects: cleanList(pins.projects), resources: cleanList(pins.resources) },
     hidden: cleanList(value.hidden),
     collapsed: cleanList(value.collapsed),
+    closedStacks: cleanList(value.closedStacks),
     knownRoots: cleanList(value.knownRoots),
     // Off unless the user turned it on: logs and doctor output are only offered to an AI service after an explicit opt-in.
     aiInspect: value.aiInspect === true,
@@ -890,7 +891,9 @@ export function startAppServer({ projects, projectsReady = Promise.resolve(), pr
         const entry = { id: randomBytes(6).toString("hex"), at: new Date().toISOString(), project: project.id, name: project.name, action: body.operation, ok: result.ok, exitCode: raw.status ?? null, durationMs: Date.now() - started, output: result.output };
         configLogs.unshift(entry);
         if (configLogs.length > CONFIG_LOG_LIMIT) configLogs.length = CONFIG_LOG_LIMIT;
+        // Regenerate and Migrate rewrite files, so an earlier drift check no longer describes them.
         if (body.operation === "verify") lastVerify.set(project.id, { ok: result.ok, at: entry.at, exitCode: entry.exitCode });
+        else lastVerify.delete(project.id);
         return sendJson(response, 200, { ...result, entry });
       }
       if (url.pathname === "/api/state" && request.method === "GET") {
