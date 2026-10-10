@@ -467,6 +467,15 @@
       .project-row { grid-template-columns: minmax(200px, 1.5fr) 110px 56px minmax(110px, .7fr) auto; }
       .project-row > .ring { justify-self: center; }
       @media (max-width: 840px) { .gauges { grid-template-columns: 1fr; } }
+      .token-bar { display: flex; align-items: center; gap: 14px; margin: -12px 0 28px; padding: 14px 18px; border: 1px solid var(--line-soft); border-radius: 16px; background: var(--surface); }
+      .token-bar.inline { margin: 4px 0 20px; }
+      .token-copy { flex: 0 1 260px; min-width: 0; }
+      .token-copy strong { display: block; font-size: 15px; font-weight: 600; }
+      .token-copy span { display: block; margin-top: 3px; font-size: 13px; color: var(--secondary); }
+      .token-track { flex: 1; height: 10px; border-radius: 999px; background: var(--c-track); overflow: hidden; }
+      .token-track i { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width 0.3s; }
+      .token-bar b { min-width: 3.2em; text-align: right; font-size: 15px; font-variant-numeric: tabular-nums; }
+      @media (max-width: 560px) { .token-bar { flex-wrap: wrap; } .token-copy { flex-basis: 100%; } .token-track { flex-basis: 100%; order: 3; } }
 
       /* Collapsible panels, one consistent header everywhere */
       .panel { margin: 0 0 24px; }

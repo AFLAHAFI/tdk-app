@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
+import { tokenSavings } from "./token-savings.js";
 
 const PROJECT_FILE = join(".tdk", "project.json");
 const PORT_FILE = join(".tdk", ".tdk-out", "tilt-port.json");
@@ -540,7 +541,7 @@ function findConflicts(snapshots) {
   return [...owners].filter(([, claimants]) => claimants.length > 1).map(([port, claimants]) => ({ port, claimants }));
 }
 
-export function startAppServer({ projects, projectsReady = Promise.resolve(), probe = probeCli, host = "127.0.0.1", port = 0, token = randomBytes(32).toString("hex"), runCommand = runTdk, openPath = openProjectPath, dockerCheck = checkDocker, dockerRestart = restartDockerDesktop, prewarm = false, statePath = null }) {
+export function startAppServer({ projects, projectsReady = Promise.resolve(), probe = probeCli, host = "127.0.0.1", port = 0, token = randomBytes(32).toString("hex"), runCommand = runTdk, openPath = openProjectPath, claudeDesktopApp = findClaudeDesktopApp, openAiApp = openInClaudeApp, dockerCheck = checkDocker, dockerRestart = restartDockerDesktop, prewarm = false, statePath = null }) {
   if (host !== "127.0.0.1") throw new Error("TDK App can only bind to 127.0.0.1.");
   let capability = null;
   let updating = false;
@@ -738,6 +739,7 @@ export function startAppServer({ projects, projectsReady = Promise.resolve(), pr
             resources: snapshot.resources,
             stacks: snapshot.stacks,
             ports: snapshot.ports.map((port) => ({ name: port.name, port: port.hostPort })),
+            ...(snapshot.pending ? {} : { tokens: tokenSavings(snapshot.project.root) }),
             conflicts: conflicts.filter((conflict) => conflict.claimants.some((claimant) => claimant.projectId === snapshot.project.id)).map((conflict) => ({
               port: conflict.port,
               claimants: conflict.claimants.map((claimant) => claimant.label),
@@ -940,6 +942,15 @@ export function startAppServer({ projects, projectsReady = Promise.resolve(), pr
         }
         return sendJson(response, 200, { ...result, ok: false, output: result.output || "TDK did not create a project here." });
       }
+      if (url.pathname === "/api/ai/build" && request.method === "POST") {
+        // Tries the Claude desktop app first. When it is not installed the client falls back to the web chats.
+        const body = await readBody(request);
+        if (typeof body.prompt !== "string" || !body.prompt || body.prompt.length > CLAUDE_PROMPT_LIMIT) return sendJson(response, 400, { error: "Choose a starter prompt of up to 14,000 characters." });
+        const app = claudeDesktopApp();
+        if (!app) return sendJson(response, 200, { ok: true, opened: null });
+        await openAiApp(app, body.prompt);
+        return sendJson(response, 200, { ok: true, opened: "claude-desktop" });
+      }
       if (url.pathname === "/api/open" && request.method === "POST") {
         const body = await readBody(request);
         const project = typeof body.project === "string" ? projects.find((entry) => entry.id === body.project) : null;
@@ -974,6 +985,23 @@ export function openProjectPath(root, kind) {
   else if (process.platform === "win32") [command, args] = ["wt.exe", ["-d", root]];
   else [command, args] = ["x-terminal-emulator", ["--working-directory", root]];
   return spawnDetached(command, args, root, process.platform === "win32");
+}
+
+// Claude's own chat route takes the prompt in `q` and caps it at 14,336 characters.
+export const CLAUDE_PROMPT_LIMIT = 14_336;
+
+// Only macOS is checked, since that is where the Claude app's install location was verified. Other platforms get no desktop option.
+export function findClaudeDesktopApp(platform = process.platform, exists = existsSync, home = homedir()) {
+  if (platform !== "darwin") return null;
+  for (const candidate of ["/Applications/Claude.app", join(home, "Applications", "Claude.app")]) {
+    if (exists(candidate)) return candidate;
+  }
+  return null;
+}
+
+// `open -a <app> <url>` hands the claude:// link to the app at the path we found, not to whichever app claims the scheme.
+export function openInClaudeApp(app, prompt) {
+  return spawnDetached("open", ["-a", app, `claude://claude.ai/new?q=${encodeURIComponent(prompt)}`]);
 }
 
 export function openBrowser(url) {
