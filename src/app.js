@@ -546,6 +546,8 @@ export function startAppServer({ projects, projectsReady = Promise.resolve(), pr
   const JOB_TIMEOUT_MS = 30 * 60_000;
   // Several projects can default to the same Tilt port, so only trust progress from the Tilt whose Tiltfile is in this project.
   const tiltOwners = new Map();
+  // macOS reports some paths through symlinks (/var -> /private/var); compare resolved paths on both sides.
+  const resolvedPath = (path) => { try { return realpathSync(path); } catch { return path; } };
   const tiltOwner = async (port, project) => {
     const cached = tiltOwners.get(port);
     if (cached && Date.now() - cached.at < 15_000) return cached.root;
@@ -554,7 +556,7 @@ export function startAppServer({ projects, projectsReady = Promise.resolve(), pr
     if (result.status === 0) {
       try {
         const path = JSON.parse(result.stdout)?.items?.[0]?.spec?.path;
-        if (typeof path === "string") root = path.split(`${sep}.tdk${sep}`)[0];
+        if (typeof path === "string") root = resolvedPath(path.split(`${sep}.tdk${sep}`)[0]);
       } catch {}
     }
     tiltOwners.set(port, { at: Date.now(), root });
@@ -564,7 +566,7 @@ export function startAppServer({ projects, projectsReady = Promise.resolve(), pr
     const cached = progressCache.get(project.id);
     if (cached && Date.now() - cached.at < 2000) return cached.value;
     const port = savedTiltPort(project.root) ?? 10350;
-    if ((await tiltOwner(port, project)) !== project.root) {
+    if ((await tiltOwner(port, project)) !== resolvedPath(project.root)) {
       progressCache.set(project.id, { at: Date.now(), value: null });
       return null;
     }
@@ -773,13 +775,15 @@ export function startAppServer({ projects, projectsReady = Promise.resolve(), pr
             invalidateStatus(project);
           }
         };
+        // One lifecycle per project at a time, whether the request waits or the page polls: a synchronous
+        // request registers the same job record, so a background request cannot start a second run beside it.
+        const running = jobs.get(project.id);
+        if (running && running.state === "running") return sendJson(response, 409, { error: "An action is already running for this project.", job: await publicJob(running) });
+        const job = { id: randomBytes(6).toString("hex"), project: project.id, operation: body.operation, state: "running", startedAt: Date.now(), endedAt: null, message: "", detached: false };
+        jobs.set(project.id, job);
+        progressCache.delete(project.id);
         if (body.background === true) {
           // Answer at once; the page polls /api/jobs for progress. Starts can take many minutes the first time images build.
-          const running = jobs.get(project.id);
-          if (running && running.state === "running") return sendJson(response, 409, { error: "An action is already running for this project.", job: await publicJob(running) });
-          const job = { id: randomBytes(6).toString("hex"), project: project.id, operation: body.operation, state: "running", startedAt: Date.now(), endedAt: null, message: "", detached: false };
-          jobs.set(project.id, job);
-          progressCache.delete(project.id);
           void lifecycle(JOB_TIMEOUT_MS).then((result) => {
             job.detached = Boolean(result?.startedDetached);
             job.state = "done";
@@ -790,7 +794,18 @@ export function startAppServer({ projects, projectsReady = Promise.resolve(), pr
           }).finally(() => { job.endedAt = Date.now(); });
           return sendJson(response, 202, { job: await publicJob(job) });
         }
-        const result = await lifecycle(180_000);
+        let result;
+        try {
+          result = await lifecycle(180_000);
+          job.state = "done";
+          job.message = body.operation === "stop" ? "Stopped." : result.startedDetached ? "Startup launched; resources are still settling." : "Started.";
+        } catch (error) {
+          job.state = "failed";
+          job.message = error instanceof Error ? error.message : String(error);
+          throw error;
+        } finally {
+          job.endedAt = Date.now();
+        }
         return sendJson(response, 200, { data: result, message: result.startedDetached ? "Startup launched; TDK will report readiness as it settles." : "TDK lifecycle operation completed." });
       }
       if (url.pathname === "/api/jobs" && request.method === "GET") {
