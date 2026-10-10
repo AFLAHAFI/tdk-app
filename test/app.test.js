@@ -262,3 +262,35 @@ describe("Build with AI", () => {
     }
   });
 });
+
+describe("Build with AI failures and token savings in the projects API", () => {
+  it("returns an error when the Claude app fails to open, so the client falls back to the web chats", async () => {
+    const started = await serverFor({ projects: [], claudeDesktopApp: () => "/Applications/Claude.app", openAiApp: async () => { throw new Error("open exited with code 1"); } });
+    const response = await fetch(new URL("/api/ai/build", started.url), {
+      method: "POST",
+      headers: { "x-tdk-token": started.token, origin: new URL(started.url).origin, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "Build an app with TDK" }),
+    });
+    assert.equal(response.status, 500);
+  });
+
+  it("adds tokens to a project once measured, and leaves them out while the status is pending", async () => {
+    const root = projectFixture("shop");
+    writeFileSync(join(root, "Tiltfile"), "x".repeat(40));
+    const runCommand = async (_project, args) => ({ status: 0, stderr: "", stdout: JSON.stringify({ data: args[0] === "status" ? { resources: [], stacks: [], ports: [], tilt: {} } : { services: [] } }) });
+    const started = await serverFor({ projects: [{ id: "shop", name: "shop", root }], runCommand, dockerCheck: async () => true });
+    const headers = { "x-tdk-token": started.token };
+    const pending = await (await fetch(new URL("/api/projects?fast=1", started.url), { headers })).json();
+    assert.equal(pending.projects[0].pending, true);
+    assert.equal("tokens" in pending.projects[0], false);
+    let tokens;
+    for (let attempt = 0; attempt < 50 && !tokens; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      tokens = (await (await fetch(new URL("/api/projects", started.url), { headers })).json()).projects[0].tokens;
+    }
+    assert.ok(tokens, "tokens never appeared");
+    assert.equal(tokens.generatedTokens, 10);
+    assert.ok(tokens.authoredTokens > 0);
+    assert.equal(tokens.truncated, false);
+  });
+});

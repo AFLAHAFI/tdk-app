@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
-import { isGeneratedPath, measureTokenSavings } from "../src/token-savings.js";
+import { createTokenCache, isGeneratedPath, measureTokenSavings } from "../src/token-savings.js";
 
 const dirs = [];
 afterEach(() => {
@@ -26,7 +26,7 @@ describe("token savings", () => {
     assert.equal(isGeneratedPath(join("services", "api", "Tiltfile")), false);
   });
 
-  it("counts generated and authored text, and skips dependencies, lockfiles and binaries", () => {
+  it("counts generated and authored text, and skips dependencies, lockfiles and binaries", async () => {
     const root = mkdtempSync(join(tmpdir(), "tdk-tokens-"));
     dirs.push(root);
     write(root, "Tiltfile", "x".repeat(400));
@@ -35,15 +35,40 @@ describe("token savings", () => {
     write(root, "services/api/bun.lock", "w".repeat(10_000));
     write(root, "services/api/node_modules/dep/index.js", "q".repeat(10_000));
     write(root, "services/api/public/logo.bin", Buffer.from([0, 1, 2, 0]));
-    const result = measureTokenSavings(root);
+    const result = await measureTokenSavings(root);
     assert.equal(result.generatedTokens, 100 + 50);
     assert.equal(result.authoredTokens, 25);
     assert.equal(result.savedPct, Math.round((150 / 175) * 100));
   });
 
-  it("reports no percentage when the project has no text", () => {
+  it("reports no percentage when the project has no text", async () => {
     const root = mkdtempSync(join(tmpdir(), "tdk-tokens-"));
     dirs.push(root);
-    assert.deepEqual(measureTokenSavings(root), { generatedTokens: 0, authoredTokens: 0, savedPct: null });
+    assert.deepEqual(await measureTokenSavings(root), { generatedTokens: 0, authoredTokens: 0, savedPct: null, truncated: false });
+  });
+
+  it("returns null from the cache first, then the measured value, and refreshes only after the TTL", async () => {
+    let clock = 0;
+    let calls = 0;
+    const cache = createTokenCache({ measure: async () => { calls += 1; return { savedPct: calls }; }, now: () => clock, ttl: 1000 });
+    assert.equal(cache.get("/p"), null);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(cache.get("/p"), { savedPct: 1 });
+    assert.equal(calls, 1);
+    clock = 500;
+    cache.get("/p");
+    assert.equal(calls, 1);
+    clock = 2000;
+    assert.deepEqual(cache.get("/p"), { savedPct: 1 });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(cache.get("/p"), { savedPct: 2 });
+  });
+
+  it("bounds the cache to a fixed number of project roots", async () => {
+    const cache = createTokenCache({ measure: async () => ({ savedPct: 1 }), limit: 2 });
+    for (const root of ["/a", "/b", "/c"]) cache.get(root);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(cache.get("/a"), null);
+    assert.deepEqual(cache.get("/c"), { savedPct: 1 });
   });
 });
