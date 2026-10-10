@@ -204,7 +204,8 @@ function pinnedResourcesPanel() {
 
 // Share of project text that TDK generated instead of the model writing it. Estimated as characters / 4 (see src/token-savings.js).
 function sumTokens(list) {
-  const totals = list.filter(Boolean).reduce((sum, tokens) => ({ generatedTokens: sum.generatedTokens + tokens.generatedTokens, authoredTokens: sum.authoredTokens + tokens.authoredTokens }), { generatedTokens: 0, authoredTokens: 0 });
+  // Projects with no percentage (empty, or a walk that hit the file cap) are left out, so partial counts never skew the total.
+  const totals = list.filter((tokens) => tokens && tokens.savedPct != null).reduce((sum, tokens) => ({ generatedTokens: sum.generatedTokens + tokens.generatedTokens, authoredTokens: sum.authoredTokens + tokens.authoredTokens }), { generatedTokens: 0, authoredTokens: 0 });
   const total = totals.generatedTokens + totals.authoredTokens;
   return total ? { ...totals, savedPct: Math.round((totals.generatedTokens / total) * 100) } : null;
 }

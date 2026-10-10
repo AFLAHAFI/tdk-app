@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
-import { tokenSavings } from "./token-savings.js";
+import { createTokenCache } from "./token-savings.js";
 
 const PROJECT_FILE = join(".tdk", "project.json");
 const PORT_FILE = join(".tdk", ".tdk-out", "tilt-port.json");
@@ -545,6 +545,13 @@ export function startAppServer({ projects, projectsReady = Promise.resolve(), pr
   if (host !== "127.0.0.1") throw new Error("TDK App can only bind to 127.0.0.1.");
   let capability = null;
   let updating = false;
+  const tokenCache = createTokenCache();
+  // Null until the first measurement finishes, so the bar appears on a later poll.
+  const tokensFor = (snapshot) => {
+    if (snapshot.pending) return {};
+    const tokens = tokenCache.get(snapshot.project.root);
+    return tokens ? { tokens } : {};
+  };
   let restartingDocker = false;
   const configLogs = [];
   // Background lifecycle jobs (one per project) and a short cache of Tilt progress.
@@ -739,7 +746,7 @@ export function startAppServer({ projects, projectsReady = Promise.resolve(), pr
             resources: snapshot.resources,
             stacks: snapshot.stacks,
             ports: snapshot.ports.map((port) => ({ name: port.name, port: port.hostPort })),
-            ...(snapshot.pending ? {} : { tokens: tokenSavings(snapshot.project.root) }),
+            ...tokensFor(snapshot),
             conflicts: conflicts.filter((conflict) => conflict.claimants.some((claimant) => claimant.projectId === snapshot.project.id)).map((conflict) => ({
               port: conflict.port,
               claimants: conflict.claimants.map((claimant) => claimant.label),
@@ -1000,8 +1007,13 @@ export function findClaudeDesktopApp(platform = process.platform, exists = exist
 }
 
 // `open -a <app> <url>` hands the claude:// link to the app at the path we found, not to whichever app claims the scheme.
+// Resolves only when `open` exits 0, so a failed launch falls back to the web chooser instead of reporting success.
 export function openInClaudeApp(app, prompt) {
-  return spawnDetached("open", ["-a", app, `claude://claude.ai/new?q=${encodeURIComponent(prompt)}`]);
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn("open", ["-a", app, `claude://claude.ai/new?q=${encodeURIComponent(prompt)}`], { stdio: "ignore" });
+    child.once("error", reject);
+    child.once("close", (code) => (code === 0 ? resolvePromise() : reject(new Error(`open exited with code ${code}`))));
+  });
 }
 
 export function openBrowser(url) {
