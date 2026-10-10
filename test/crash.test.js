@@ -361,10 +361,24 @@ describe("CLI misbehaviour", () => {
     assert.equal((await raw(server, { path: "/api/cli" })).json.lifecycle, true);
   });
 
-  it("does not run lifecycle commands concurrently-unsafe: parallel actions all settle", async () => {
-    const { server } = await boot({ runCommand: async () => { await new Promise((resolve) => setTimeout(resolve, 10)); return okEnvelope({}); } });
+  it("runs one lifecycle at a time per project; overlapping requests get 409, never a second run", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const { server } = await boot({
+      runCommand: async (_project, args) => {
+        // Only lifecycle commands count; other requests (Docker and CLI checks) may overlap freely.
+        const lifecycle = args[0] === "up" || args[0] === "down";
+        if (lifecycle) { active += 1; maxActive = Math.max(maxActive, active); }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        if (lifecycle) active -= 1;
+        return okEnvelope({});
+      },
+    });
     const results = await Promise.all(Array.from({ length: 25 }, () => post(server, "/api/actions", { project: "a", operation: "restart" })));
-    assert(results.every((result) => result.status === 200));
+    assert(results.every((result) => result.status === 200 || result.status === 409));
+    assert(results.some((result) => result.status === 200));
+    // The background path shares the same record, so a background start cannot overlap a synchronous one.
+    assert.equal(maxActive, 1);
   });
 });
 

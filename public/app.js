@@ -673,7 +673,9 @@ async function handleAction(button) {
     if (scope === "resource") payload.resources = [name];
     const result = await api("/api/actions", { method: "POST", body: JSON.stringify(payload) });
     if (result.job) {
-      jobsByProject.set(project, result.job);
+      // The job can finish before this response is sent. Keep it active so pollJobs() sees the change and announces it.
+      const trackedJob = ACTIVE.has(result.job.state) ? result.job : { ...result.job, state: "running" };
+      jobsByProject.set(project, trackedJob);
       startJobPolling();
     }
   } catch (error) {
