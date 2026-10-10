@@ -235,6 +235,7 @@ export function normalizeState(raw) {
     pins: { projects: cleanList(pins.projects), resources: cleanList(pins.resources) },
     hidden: cleanList(value.hidden),
     collapsed: cleanList(value.collapsed),
+    closedStacks: cleanList(value.closedStacks),
     knownRoots: cleanList(value.knownRoots),
     // Off unless the user turned it on: logs and doctor output are only offered to an AI service after an explicit opt-in.
     aiInspect: value.aiInspect === true,

@@ -6,6 +6,7 @@ let projects = [];
 let selectedProjectId = null;
 let searchTerm = "";
 let cli = null;
+let cliChecked = false; // true once the capability request has answered, even if it failed
 
 history.replaceState(null, "", location.pathname);
 
@@ -26,14 +27,19 @@ async function api(url, options = {}) {
       ...(options.headers || {}),
     },
   });
-  const body = await response.json();
+  // A body that is not JSON (for example after a crash) gets a readable message instead of a parser error.
+  const body = await response.json().catch(() => ({ error: `TDK App got an unexpected response (HTTP ${response.status}).` }));
   if (!response.ok) throw Object.assign(new Error(body.error || "Request failed."), { code: body.code, lowDisk: body.lowDisk });
   return body;
 }
 
+// States that are on their way to ready. Any other unknown state gets a neutral dot.
+const PENDING_STATES = new Set(["building", "starting", "settling", "in_progress", "in-progress", "pending"]);
+
 function statusClass(value) {
   if (value === "ready" || value === "running") return "ready";
   if (value === "error" || value === "failed") return "error";
+  if (PENDING_STATES.has(value)) return "pending";
   return "";
 }
 
@@ -42,15 +48,18 @@ function statusLabel(value) {
   if (value === "running") return "Running";
   if (value === "error" || value === "failed") return "Error";
   if (value === "stopped" || value === "not-running") return "Stopped";
-  return value || "Unknown";
+  if (!value) return "Unknown";
+  const text = String(value).replace(/[_-]+/g, " ").trim();
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function statusMarkup(value) {
   return `<span class="status-label"><i class="state-dot ${statusClass(value)}"></i>${esc(statusLabel(value))}</span>`;
 }
 
-function symbolMarkup(name) {
-  return `<span class="project-symbol" aria-hidden="true">${esc((name || "T").slice(0, 1).toUpperCase())}</span>`;
+// On narrow windows the status dot sits on the symbol, because the status text is hidden there.
+function symbolMarkup(name, state = "") {
+  return `<span class="project-symbol" aria-hidden="true">${esc((name || "T").slice(0, 1).toUpperCase())}${state ? `<i class="state-dot ${state} row-dot"></i>` : ""}</span>`;
 }
 
 const ICONS = {
@@ -79,8 +88,8 @@ function decorateButtons(root = document) {
   }
 }
 
-function actionButton(action, project, scope = "project", name = "", label = action[0].toUpperCase() + action.slice(1), extra = "") {
-  return `<button class="button ${action === "start" ? "primary" : action === "stop" ? "danger" : ""} ${extra}" type="button" data-action="${esc(action)}" data-project="${esc(project.id)}" data-scope="${esc(scope)}" data-name="${esc(name)}">${esc(label)}</button>`;
+function actionButton(action, project, scope = "project", name = "", label = action[0].toUpperCase() + action.slice(1), extra = "", disabled = false) {
+  return `<button class="button ${action === "start" ? "primary" : action === "stop" ? "danger" : ""} ${extra}" type="button" data-action="${esc(action)}" data-project="${esc(project.id)}" data-scope="${esc(scope)}" data-name="${esc(name)}" ${disabled ? "disabled" : ""}>${esc(label)}</button>`;
 }
 
 // Borderless, icon-only toolbar button (tooltip carries the label).
@@ -98,12 +107,14 @@ function inspectRow(prompt, className = "") {
 }
 
 function menuButton(items) {
-  return `<div class="menu-wrap"><button class="icon-btn" type="button" data-menu title="More actions" aria-label="More actions" aria-haspopup="menu"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="5" cy="10" r="1.5" fill="currentColor"/><circle cx="10" cy="10" r="1.5" fill="currentColor"/><circle cx="15" cy="10" r="1.5" fill="currentColor"/></svg></button><div class="menu" role="menu" hidden>${items.map((item) => item === "-" ? `<hr>` : `<button type="button" role="menuitem" data-action="${esc(item.action)}" data-iconed="1" ${Object.entries(item.data || {}).map(([k, v]) => `data-${k}="${esc(v)}"`).join(" ")}><svg viewBox="0 0 20 20" aria-hidden="true">${ICONS[ACTION_ICONS[item.action]] || ""}</svg>${esc(item.label)}</button>`).join("")}</div></div>`;
+  return `<div class="menu-wrap"><button class="icon-btn" type="button" data-menu title="More actions" aria-label="More actions" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="5" cy="10" r="1.5" fill="currentColor"/><circle cx="10" cy="10" r="1.5" fill="currentColor"/><circle cx="15" cy="10" r="1.5" fill="currentColor"/></svg></button><div class="menu" role="menu" hidden>${items.map((item) => item === "-" ? `<hr>` : `<button type="button" role="menuitem" data-action="${esc(item.action)}" data-iconed="1" ${Object.entries(item.data || {}).map(([k, v]) => `data-${k}="${esc(v)}"`).join(" ")}><svg viewBox="0 0 20 20" aria-hidden="true">${ICONS[ACTION_ICONS[item.action]] || ""}</svg>${esc(item.label)}</button>`).join("")}</div></div>`;
 }
 
-function actionSet(project, scope = "project", name = "", compact = false) {
-  const klass = "row-actions";
-  return `<div class="${klass}">${actionButton("start", project, scope, name, "Start")}${scope === "project" ? `${actionButton("stop", project, scope, name, "Stop")}${actionButton("restart", project, scope, name, "Restart")}` : ""}</div>`;
+// Start is disabled while the project runs and Stop while it is stopped. Unknown state (pending or unreadable) leaves both enabled.
+function actionSet(project, scope = "project", name = "") {
+  const known = !project.pending && !project.error;
+  const running = Boolean(project.tiltRunning);
+  return `<div class="row-actions">${actionButton("start", project, scope, name, "Start", "", known && running)}${scope === "project" ? `${actionButton("stop", project, scope, name, "Stop", "", known && !running)}${actionButton("restart", project, scope, name, "Restart")}` : ""}</div>`;
 }
 
 // UI state lives in a file via /api/state: the page origin (random port) changes every launch, so browser storage would forget it.
@@ -118,7 +129,9 @@ let saveTimer = null;
 function saveState() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    void api("/api/state", { method: "PUT", body: JSON.stringify({ hidden: [...hidden], collapsed: [...collapsed], pins: { projects: [...pinnedProjects], resources: [...pinnedResources] }, aiInspect }) }).catch(() => {});
+    void api("/api/state", { method: "PUT", body: JSON.stringify({ hidden: [...hidden], collapsed: [...collapsed], closedStacks: [...closedStacks], pins: { projects: [...pinnedProjects], resources: [...pinnedResources] }, aiInspect }) }).catch(() => {
+      showNotice("Could not save your pins, hidden projects or layout. They may be lost when TDK App restarts.", true);
+    });
   }, 200);
 }
 async function loadState() {
@@ -126,6 +139,7 @@ async function loadState() {
     const state = await api("/api/state");
     for (const id of state.hidden || []) hidden.add(id);
     for (const id of state.collapsed || []) collapsed.add(id);
+    for (const key of state.closedStacks || []) closedStacks.add(key);
     for (const id of state.pins?.projects || []) pinnedProjects.add(id);
     for (const key of state.pins?.resources || []) pinnedResources.add(key);
     aiInspect = state.aiInspect === true;
@@ -145,6 +159,12 @@ function filteredProjects() {
   return base.filter((project) => `${project.name} ${project.path}`.toLowerCase().includes(query));
 }
 
+// The folder a project sits in, so two projects with the same name can be told apart.
+function parentFolder(path) {
+  const parts = String(path || "").split("/").filter(Boolean);
+  return parts.length > 1 ? `…/${parts[parts.length - 2]}` : "";
+}
+
 function renderSidebar() {
   document.querySelector("#nav-count").textContent = projects.length;
   document.querySelector("#side-count").textContent = projects.length;
@@ -155,7 +175,7 @@ function renderSidebar() {
   }
   const item = (project) => `
     <button class="project-item ${project.id === selectedProjectId ? "active" : ""}" type="button" data-select-project="${esc(project.id)}" title="${esc(project.name)} · ${esc(project.path)}">
-      ${symbolMarkup(project.name)}<span class="project-item-name">${esc(project.name)}</span>${pinnedProjects.has(project.id) ? PIN_GLYPH : ""}
+      ${symbolMarkup(project.name)}<span class="project-item-copy"><span class="project-item-name">${esc(project.name)}</span><span class="project-item-path">${esc(parentFolder(project.path))}</span></span>${pinnedProjects.has(project.id) ? PIN_GLYPH : ""}
     </button>`;
   const pinned = visible.filter((project) => pinnedProjects.has(project.id));
   const rest = visible.filter((project) => !pinnedProjects.has(project.id));
@@ -170,7 +190,7 @@ function pinnedResourcesPanel() {
     const slash = key.indexOf("/");
     const project = projects.find((entry) => entry.id === key.slice(0, slash));
     const resource = project?.resources?.find((entry) => entry.name === key.slice(slash + 1));
-    if (!project || !resource) continue;
+    if (!project || !resource || hidden.has(project.id)) continue;
     rows.push(`<div class="resource-row pinned-row">
       <div class="resource-name" title="${esc(resource.name)}">${esc(resource.name)}<span class="resource-type">${esc(project.name)}${resource.type ? ` · ${esc(resource.type)}` : ""}</span></div>
       ${statusMarkup(resource.status)}
@@ -186,16 +206,26 @@ function overviewGauges(ready, resources) {
   const scores = projects.map((project) => doctors.get(project.id)?.score).filter((score) => typeof score === "number");
   const average = scores.length ? Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length) : null;
   const running = projects.filter((project) => project.tiltRunning).length;
+  const failed = projects.filter((project) => doctors.get(project.id)?.error).length;
   const pct = (part, whole) => (whole ? Math.round((part / whole) * 100) : null);
+  const healthCaption = scores.length
+    ? `${scores.length} of ${projects.length} projects checked`
+    : failed && failed === projects.length ? `Doctor failed for ${failed} project${failed === 1 ? "" : "s"}` : "Running tdk doctor…";
   return [
-    gaugeCard({ value: average, text: average == null ? "…" : String(average), sub: average == null ? "" : "of 100", title: "Average health", caption: scores.length ? `${scores.length} of ${projects.length} projects checked` : "Running tdk doctor…", cls: average == null ? "none" : undefined }),
+    gaugeCard({ value: average, text: average == null ? "…" : String(average), sub: average == null ? "" : "of 100", title: "Average health", caption: healthCaption, cls: average == null ? "none" : undefined }),
     gaugeCard({ value: pct(ready, resources), text: `${ready}`, sub: `of ${resources}`, title: "Resources ready", caption: `${ready} of ${resources} resources`, cls: resources ? (ready === resources ? "good" : ready ? "warn" : "none") : "none" }),
     gaugeCard({ value: pct(running, projects.length), text: `${running}`, sub: `of ${projects.length}`, title: "Projects running", caption: `${running} of ${projects.length} projects`, cls: running ? "good" : "none" }),
   ].join("");
 }
 
+// Hidden IDs for projects that no longer exist are not counted.
+function currentHiddenCount() {
+  return projects.filter((project) => hidden.has(project.id)).length;
+}
+
 function renderOverview() {
   const visible = filteredProjects();
+  const hiddenCount = currentHiddenCount();
   const resources = projects.reduce((sum, project) => sum + (project.resources || []).length, 0);
   const ready = projects.reduce((sum, project) => sum + (project.resources || []).filter((resource) => resource.status === "ready").length, 0);
   document.querySelector("#breadcrumb").innerHTML = "<strong>Overview</strong>";
@@ -204,18 +234,19 @@ function renderOverview() {
   const rows = visible.map((project) => {
     const conflicts = (project.conflicts || []).length;
     return `<div class="project-row">
-      <button class="project-open" type="button" data-select-project="${esc(project.id)}">${symbolMarkup(project.name)}<span class="row-title"><strong>${esc(project.name)}${pinnedProjects.has(project.id) ? PIN_GLYPH : ""}</strong><small>${esc(project.path)}</small></span></button>
+      <button class="project-open" type="button" data-select-project="${esc(project.id)}">${symbolMarkup(project.name, project.error ? "error" : project.tiltRunning ? "ready" : "")}<span class="row-title"><strong>${esc(project.name)}${pinnedProjects.has(project.id) ? PIN_GLYPH : ""}</strong><small>${esc(project.path)}</small></span></button>
       ${project.pending ? `<span class="status-label"><i class="state-dot"></i>Checking…</span>` : project.error ? `<span class="status-label"><i class="state-dot error"></i>Unavailable</span>` : statusMarkup(project.tiltRunning ? "running" : "stopped")}
       ${scoreMarkup(project)}
-      <span class="row-meta resources-count" ${project.error ? `title="${esc(project.error)}"` : ""}>${project.pending ? "" : project.error ? esc(project.error.slice(0, 60)) : `${(project.resources || []).length} resources${conflicts ? ` <span class="badge warn" title="${conflicts} configured port conflicts">${conflicts} conflicts</span>` : ""}`}</span>
+      <span class="row-meta resources-count" ${project.error ? `title="${esc(project.error)}"` : ""}>${project.pending ? "" : project.error ? esc(shortText(project.error, 60)) : `<span class="res-text">${(project.resources || []).length} resources</span>${conflicts ? ` <span class="badge warn" title="${conflicts} configured port conflicts">${conflicts} conflicts</span>` : ""}${doctors.get(project.id)?.error ? ` <span class="badge bad" title="${esc(doctors.get(project.id).error)}">Doctor failed</span>` : ""}`}</span>
       ${actionSet(project, "project", "", true)}
       ${progressMarkup(project.id, true)}
     </div>`;
   }).join("");
 
   content.innerHTML = `<div class="content-inner">
-    <div class="page-head"><div><h1>Projects</h1><p>${projects.length} local workspace${projects.length === 1 ? "" : "s"} discovered across your development folders.</p>${hidden.size ? `<div class="hidden-note">${hidden.size} hidden · <button type="button" data-action="toggle-hidden">${showHidden ? "Hide them again" : "Show them"}</button></div>` : ""}</div>
+    <div class="page-head"><div><h1>Projects</h1><p>${projects.length} local workspace${projects.length === 1 ? "" : "s"} discovered across your development folders.</p>${hiddenCount ? `<div class="hidden-note">${hiddenCount} hidden · <button type="button" data-action="toggle-hidden">${showHidden ? "Hide them again" : "Show them"}</button></div>` : ""}</div>
       <div class="head-actions"><button class="button" type="button" data-action="build-with-ai">Build with AI</button><button class="button primary" type="button" data-action="new-project">New project</button></div></div>
+    <div class="narrow-search"><input id="content-search" type="search" placeholder="Filter projects" aria-label="Filter projects" value="${esc(searchTerm)}" autocomplete="off"></div>
     ${collapsible("summary", "Summary", `<div class="gauges">${overviewGauges(ready, resources)}</div>`)}
     ${pinnedResourcesPanel()}
     <div id="notice" class="notice" role="status"></div>
@@ -223,32 +254,42 @@ function renderOverview() {
   </div>`;
 }
 
+// Groups are keyed so that a stack called "Unassigned" never shares a group with resources that have no stack.
+const UNASSIGNED_KEY = "unassigned";
+const STACK_KEY_PREFIX = "stack:";
+
 function renderDetail(project) {
   const resources = project.resources || [];
   const grouped = new Map();
   for (const resource of resources) {
-    const stack = resource.stack || "Unassigned";
-    if (!grouped.has(stack)) grouped.set(stack, []);
-    grouped.get(stack).push(resource);
+    const key = resource.stack ? `${STACK_KEY_PREFIX}${resource.stack}` : UNASSIGNED_KEY;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(resource);
   }
-  const stacks = (project.stacks || []).map((stack) => stack.name);
-  for (const name of grouped.keys()) if (name !== "Unassigned" && !stacks.includes(name)) stacks.push(name);
-  if (grouped.has("Unassigned")) stacks.push("Unassigned");
+  const stackKeys = (project.stacks || []).map((stack) => `${STACK_KEY_PREFIX}${stack.name}`);
+  for (const key of grouped.keys()) if (key !== UNASSIGNED_KEY && !stackKeys.includes(key)) stackKeys.push(key);
+  const realStackCount = stackKeys.length;
+  const stacks = [...stackKeys];
+  if (grouped.has(UNASSIGNED_KEY)) stacks.push(UNASSIGNED_KEY);
   const conflicts = project.conflicts || [];
   const conflictPorts = new Set(conflicts.map((conflict) => conflict.port));
-  const ports = (project.ports || []).map((port) => `<span class="port-chip ${conflictPorts.has(port.port) ? "conflict" : ""}">${esc(port.name)} · :${esc(port.port)}</span>`).join("");
-  const conflictDetails = conflicts.length ? `<details class="conflicts"><summary>${conflicts.length} configured port conflict${conflicts.length === 1 ? "" : "s"}</summary><div class="conflict-body">${conflicts.map((conflict) => `<div>Port ${esc(conflict.port)} · ${esc((conflict.claimants || []).join(", "))}</div>`).join("")}</div></details>` : "";
+  const ports = (project.ports || []).map((port) => conflictPorts.has(port.port)
+    ? `<span class="port-chip conflict" title="Port conflict: another project also uses this port">⚠ ${esc(port.name)} · :${esc(port.port)}</span>`
+    : `<span class="port-chip">${esc(port.name)} · :${esc(port.port)}</span>`).join("");
+  const conflictDetails = conflicts.length ? `<details class="conflicts" data-key="conflicts/${esc(project.id)}"${openDetails.has(`conflicts/${project.id}`) ? " open" : ""}><summary>${conflicts.length} configured port conflict${conflicts.length === 1 ? "" : "s"}</summary><div class="conflict-body">${conflicts.map((conflict) => `<div>Port ${esc(conflict.port)} · ${esc((conflict.claimants || []).join(", "))}</div>`).join("")}</div></details>` : "";
 
-  const stackMarkup = stacks.map((name) => {
-    const items = grouped.get(name) || [];
+  const stackMarkup = stacks.map((key) => {
+    const name = key === UNASSIGNED_KEY ? "Unassigned" : key.slice(STACK_KEY_PREFIX.length);
+    const items = grouped.get(key) || [];
+    const closed = closedStacks.has(`${project.id}/${key}`);
     const resourcesMarkup = items.length ? items.map((resource) => `<div class="resource-row">
-      <div class="resource-name" title="${esc(resource.name)}">${esc(resource.name)}${resource.type ? `<span class="resource-type">${esc(resource.type)}</span>` : ""}</div>
+      <div class="resource-name" title="${esc(resource.name)}"><i class="state-dot ${statusClass(resource.status)} row-dot"></i>${esc(resource.name)}${resource.type ? `<span class="resource-type">${esc(resource.type)}</span>` : `<span class="resource-type">Type not reported</span>`}</div>
       ${statusMarkup(resource.status)}
       ${resource.url ? `<a class="resource-url" href="${esc(resource.url)}" target="_blank" rel="noreferrer">${esc(resource.url)}</a>` : `<span class="resource-url">No endpoint</span>`}
       <div class="resource-actions">${iconButton("start", `Start ${resource.name}`, { project: project.id, scope: "resource", name: resource.name })}${iconButton("move-resource", "Move to another stack", { project: project.id, name: resource.name, stack: resource.stack || "" })}${iconButton("logs", "Recent logs", { project: project.id, name: resource.name })}${iconButton("pin-resource", pinnedResources.has(`${project.id}/${resource.name}`) ? "Unpin resource" : "Pin resource", { project: project.id, name: resource.name, pinned: pinnedResources.has(`${project.id}/${resource.name}`) ? "1" : "0" })}</div>
     </div>`).join("") : `<div class="resource-row"><span class="resource-name">No resources assigned</span></div>`;
-    const quickActions = name === "Unassigned" ? "" : `<div class="stack-quick">${iconButton("start", `Start stack ${name}`, { project: project.id, scope: "stack", name })}</div>`;
-    return `<section class="stack ${closedStacks.has(`${project.id}/${name}`) ? "" : "open"}" data-stack="${esc(name)}" data-key="${esc(`${project.id}/${name}`)}"><div class="stack-head"><button class="stack-toggle" type="button" aria-expanded="${!closedStacks.has(`${project.id}/${name}`)}">${chevronMarkup()}<span class="stack-name">${esc(name)}</span><span class="stack-count">${items.length} resource${items.length === 1 ? "" : "s"}</span></button>${quickActions}</div><div class="resource-list">${resourcesMarkup}</div></section>`;
+    const quickActions = key === UNASSIGNED_KEY ? "" : `<div class="stack-quick">${iconButton("start", `Start stack ${name}`, { project: project.id, scope: "stack", name })}</div>`;
+    return `<section class="stack ${closed ? "" : "open"}" data-stack="${esc(name)}" data-key="${esc(`${project.id}/${key}`)}"><div class="stack-head"><button class="stack-toggle" type="button" aria-expanded="${!closed}">${chevronMarkup()}<span class="stack-name">${esc(name)}</span><span class="stack-count">${items.length} resource${items.length === 1 ? "" : "s"}</span></button>${quickActions}</div><div class="resource-list">${resourcesMarkup}</div></section>`;
   }).join("");
 
   document.querySelector("#overview-nav").classList.remove("active");
@@ -261,11 +302,11 @@ function renderDetail(project) {
         { action: "hide-project", label: hidden.has(project.id) ? "Unhide project" : "Hide project", data: { project: project.id } },
       ])}</div></div>
     ${progressMarkup(project.id)}
-    <div class="detail-meta">${project.pending ? `<span class="status-label"><i class="state-dot"></i>Checking status…</span>` : `${statusMarkup(project.tiltRunning ? "running" : "stopped")}<span class="meta-item">${resources.length} resources</span><span class="meta-item">${stacks.length} stacks</span>`}<span hidden></span></div>
+    <div class="detail-meta">${project.pending ? `<span class="status-label"><i class="state-dot"></i>Checking status…</span>` : project.error ? `<span class="status-label"><i class="state-dot error"></i>Unavailable</span>` : `${statusMarkup(project.tiltRunning ? "running" : "stopped")}<span class="meta-item">${resources.length} resources</span><span class="meta-item">${realStackCount} stack${realStackCount === 1 ? "" : "s"}</span>`}<span hidden></span></div>
     ${ports ? `<div class="ports">${ports}</div>` : ""}${conflictDetails}
     ${doctorSection(project)}
     ${configSection(project)}
-    ${collapsible("stacks", "Stacks & resources", `<div class="stack-list">${project.pending ? `<div class="skel-row"></div><div class="skel-row"></div>` : stackMarkup || `<div class="empty"><span class="empty-icon">T</span><strong>No resources found</strong><p>Initialize this folder with the TDK CLI to add resources.</p></div>`}</div>`, `${resources.length} total <button class="link-btn" type="button" data-action="new-stack" data-project="${esc(project.id)}">New stack</button><button class="link-btn" type="button" data-action="new-resource" data-project="${esc(project.id)}">Add resource</button>`)}
+    ${collapsible("stacks", "Stacks & resources", `<div class="stack-list">${project.pending ? `<div class="skel-row"></div><div class="skel-row"></div>` : stackMarkup || `<div class="empty"><span class="empty-icon">T</span><strong>No resources found</strong><p>Initialize this folder with the TDK CLI to add resources.</p></div>`}</div>`, `${resources.length} total <span class="scope-note">Stop and Restart act on the whole project</span><button class="link-btn" type="button" data-action="new-stack" data-project="${esc(project.id)}">New stack</button><button class="link-btn" type="button" data-action="new-resource" data-project="${esc(project.id)}">Add resource</button>`)}
   </div>`;
 }
 
@@ -284,13 +325,32 @@ function chevronMarkup() {
 
 // Stacks stay open across the 7-second refresh unless the user closed them.
 const closedStacks = new Set();
+// Keys of <details> elements the user opened (for example config log entries and port conflicts).
+const openDetails = new Set();
 
 // Keep the scroll position across the periodic refresh, but start at the top when switching pages.
 let lastView;
+// Re-rendering replaces every element, so remember the focused control (and its caret) and put focus back on the match.
+const focusSignature = (element) => `${element.tagName}|${[...element.attributes].filter((attr) => attr.name === "id" || attr.name.startsWith("data-")).map((attr) => `${attr.name}=${attr.value}`).join("&")}`;
+function focusSnapshot() {
+  const element = document.activeElement;
+  if (!element || element === document.body || !(content.contains(element) || projectList.contains(element))) return null;
+  const caret = element.matches("input, textarea") ? { start: element.selectionStart, end: element.selectionEnd } : null;
+  return { signature: focusSignature(element), caret };
+}
+function restoreFocus(snapshot) {
+  if (!snapshot) return;
+  const match = [...content.querySelectorAll("button, input, select, a, summary"), ...projectList.querySelectorAll("button")].find((element) => focusSignature(element) === snapshot.signature);
+  if (!match) return;
+  match.focus({ preventScroll: true });
+  if (snapshot.caret && match.setSelectionRange) match.setSelectionRange(snapshot.caret.start, snapshot.caret.end);
+}
+
 function render() {
   const view = selectedProjectId ?? "overview";
   const scrollTop = view === lastView ? content.scrollTop : 0;
   lastView = view;
+  const focused = focusSnapshot();
   renderSidebar();
   const selected = projects.find((project) => project.id === selectedProjectId);
   if (selected) renderDetail(selected);
@@ -300,6 +360,12 @@ function render() {
   applyActiveNotice();
   applyBusy();
   content.scrollTop = scrollTop;
+  restoreFocus(focused);
+}
+
+function shortText(text, max) {
+  const value = String(text ?? "");
+  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
 const doctors = new Map();
@@ -343,21 +409,24 @@ function gaugeCard({ value, text, sub = "", title, caption, cls }) {
 
 function stackedBar(result) {
   const total = result.total || 1;
-  const part = (count, cls) => (count ? `<i class="${cls}" style="flex:${count / total}" title="${count}"></i>` : "");
-  return `<div class="bar" role="img" aria-label="${result.passed} passed, ${result.warnings} warnings, ${result.failed} failed">${part(result.passed, "pass")}${part(result.warnings, "warning")}${part(result.failed, "fail")}</div>`;
+  const part = (count, cls, label) => (count ? `<i class="${cls}" style="flex:${count / total}" title="${count} ${label}"></i>` : "");
+  return `<div class="bar" role="img" aria-label="${result.passed} passed, ${result.warnings} warnings, ${result.failed} failed">${part(result.passed, "pass", "passed")}${part(result.warnings, "warning", "warnings")}${part(result.failed, "fail", "failed")}</div>`;
 }
 
 // Runs doctor one project at a time so a stuck Docker cannot spawn many hung checks.
+// A failed run is retried after DOCTOR_RETRY_MS, so one transient failure does not stick until reload.
+const DOCTOR_RETRY_MS = 60_000;
 async function loadDoctors(force = false) {
   if (doctorRunning) return;
   doctorRunning = true;
   try {
     for (const project of projects) {
-      if (!force && doctors.has(project.id)) continue;
+      const previous = doctors.get(project.id);
+      if (!force && previous && (!previous.error || Date.now() - previous.at < DOCTOR_RETRY_MS)) continue;
       try {
-        doctors.set(project.id, await api(`/api/doctor?project=${encodeURIComponent(project.id)}${force ? "&refresh=1" : ""}`));
+        doctors.set(project.id, { ...(await api(`/api/doctor?project=${encodeURIComponent(project.id)}${force ? "&refresh=1" : ""}`)), at: Date.now() });
       } catch (error) {
-        doctors.set(project.id, { error: error.message });
+        doctors.set(project.id, { error: error.message, at: Date.now() });
       }
       render();
     }
@@ -372,7 +441,7 @@ function doctorSection(project) {
   if (!result) return collapsible("doctor", "Doctor", `<div class="doctor-box">Running tdk doctor…</div>`, rerun);
   if (result.error) return collapsible("doctor", "Doctor", `<div class="doctor-box"><div class="notice show error">Doctor could not finish: ${esc(result.error)}</div></div>`, rerun);
   const issues = result.checks.filter((check) => check.status === "fail" || check.status === "warning");
-  const list = issues.length ? issues.map((check) => `<div class="doctor-item ${check.status}"><strong>${esc(check.name)}</strong><span>${esc(check.message)}</span>${check.fix ? `<code>${esc(check.fix)}</code>` : ""}</div>`).join("") : `<div class="doctor-item pass"><strong>All ${result.total} checks passed</strong></div>`;
+  const list = issues.length ? issues.map((check) => `<div class="doctor-item ${check.status}"><strong>${esc(check.name)}</strong><span>${esc(check.message)}</span>${check.fix ? `<div class="fix-row"><code>${esc(check.fix)}</code><button class="link-btn copy-btn" type="button" data-copy="${esc(check.fix)}">Copy</button></div>` : ""}</div>`).join("") : result.total ? `<div class="doctor-item pass"><strong>All ${result.total} checks passed</strong></div>` : `<div class="doctor-item"><strong>No checks ran</strong><span>tdk doctor returned no results. Run it again, or check the TDK CLI version.</span></div>`;
   const ask = issues.length ? inspectRow(TDK_INSPECT.doctorPrompt({ project: project.name, path: project.path, score: result.score, issues })) : "";
   return collapsible("doctor", "Doctor", `<div class="doctor-box"><div class="doctor-summary">${scoreMarkup(project, 84)}<div class="doctor-meta"><strong>${result.score ?? "—"} / 100</strong>${stackedBar(result)}<div class="legend"><span><i class="pass"></i>${result.passed} passed</span><span><i class="warning"></i>${result.warnings} warnings</span><span><i class="fail"></i>${result.failed} failed</span></div></div></div>${list}${ask}</div>`, rerun);
 }
@@ -397,19 +466,23 @@ async function updateCli() {
 }
 
 function applyCliCapability() {
-  if (!cli || cli.lifecycle) return;
+  if (cli?.lifecycle) return;
+  // Until the check answers, and when it fails, Start, Stop and Restart stay off rather than being offered blind.
+  const reason = !cliChecked ? "Checking the TDK CLI…" : cli ? "Not available with this TDK CLI version." : "TDK App could not check the TDK CLI.";
   for (const button of document.querySelectorAll('[data-action="start"], [data-action="stop"], [data-action="restart"]')) {
     button.disabled = true;
-    button.title = "Not available with this TDK CLI version.";
+    button.title = reason;
   }
+  if (!cliChecked) return;
   const banner = document.createElement("div");
   banner.className = "notice show error cli-banner";
   banner.setAttribute("role", "alert");
-  const canUpdate = cli.state === "unsupported" || cli.state === "failed";
+  const canUpdate = cli?.state === "unsupported" || cli?.state === "failed";
   const update = canUpdate ? ` <button class="button" type="button" id="update-cli" ${updateState.running ? "disabled" : ""}>${updateState.running ? "Updating…" : "Update TDK CLI"}</button>` : "";
   const outcome = updateState.message ? `<div class="update-result">${esc(updateState.message)}</div>` : "";
-  const link = cli.installUrl ? ` <a href="${esc(cli.installUrl)}" target="_blank" rel="noreferrer noopener">Install or update instructions</a>` : "";
-  banner.innerHTML = `${esc(cli.message)}${link}${update}${outcome}`;
+  const link = cli?.installUrl ? ` <a href="${esc(cli.installUrl)}" target="_blank" rel="noreferrer noopener">Install or update instructions</a>` : "";
+  const message = cli ? cli.message : "TDK App could not check the TDK CLI, so Start, Stop and Restart are off. Status and logs still work. This check runs again on the next refresh.";
+  banner.innerHTML = `${esc(message)}${link}${update}${outcome}`;
   banner.querySelector("#update-cli")?.addEventListener("click", updateCli);
   const inner = content.querySelector(".content-inner") || content;
   inner.prepend(banner);
@@ -420,7 +493,7 @@ let pendingTimer = null;
 async function refreshData() {
   try {
     if (!stateLoaded) await loadState();
-    const cliRequest = api("/api/cli").catch(() => null).then((value) => { cli = value; if (projects.length) render(); });
+    const cliRequest = api("/api/cli").catch(() => null).then((value) => { cli = value; cliChecked = true; if (projects.length) render(); });
     const response = await api("/api/projects?fast=1");
     void cliRequest;
     projects = response.projects || [];
@@ -431,6 +504,11 @@ async function refreshData() {
     if (projects.some((project) => project.pending)) pendingTimer = setTimeout(refreshData, 900);
     else void loadDoctors();
   } catch (error) {
+    // Once projects are on screen, a failed refresh only adds a message. The page stays as it is.
+    if (projects.length) {
+      showNotice(`Could not refresh projects: ${error.message}. Showing the last known state.`, true);
+      return;
+    }
     content.innerHTML = `<div class="content-inner"><div class="empty"><span class="empty-icon">!</span><strong>Couldn’t load projects</strong><p>${esc(error.message)}</p><button class="button" type="button" id="retry">Try again</button></div></div>`;
     document.querySelector("#retry")?.addEventListener("click", refreshData);
   }
@@ -440,8 +518,18 @@ let noticeTimer = null;
 
 function applyActiveNotice() {
   const element = document.querySelector("#notice");
-  if (!element || !activeNotice) return;
-  element.textContent = activeNotice.message;
+  if (!element) return;
+  // A notice about one project only shows on that project's page.
+  const visible = activeNotice && (!activeNotice.project || activeNotice.project === selectedProjectId);
+  if (!visible) {
+    element.replaceChildren();
+    element.classList.remove("show", "error");
+    return;
+  }
+  element.replaceChildren();
+  const text = document.createElement("span");
+  text.textContent = activeNotice.message;
+  element.append(text);
   element.classList.toggle("error", activeNotice.isError);
   element.classList.add("show");
   if (activeNotice.action) {
@@ -453,19 +541,28 @@ function applyActiveNotice() {
     button.addEventListener("click", activeNotice.action.run);
     element.append(button);
   }
+  const close = document.createElement("button");
+  close.className = "notice-close";
+  close.type = "button";
+  close.setAttribute("aria-label", "Dismiss message");
+  close.textContent = "×";
+  close.addEventListener("click", dismissNotice);
+  element.append(close);
 }
 
-// Sticky notices (in-progress work) stay until replaced; others clear after a few seconds.
-function showNotice(message, isError = false, sticky = false, action = null) {
+function dismissNotice() {
   clearTimeout(noticeTimer);
-  activeNotice = { message, isError, action };
+  activeNotice = null;
   applyActiveNotice();
-  if (!sticky && !action) {
-    noticeTimer = setTimeout(() => {
-      activeNotice = null;
-      document.querySelector("#notice")?.classList.remove("show");
-    }, 9000);
-  }
+}
+
+// Sticky notices (in-progress work) stay until replaced or dismissed; others clear after a few seconds.
+// projectId limits the notice to that project's page; leave it null for messages that apply everywhere.
+function showNotice(message, isError = false, sticky = false, action = null, projectId = null) {
+  clearTimeout(noticeTimer);
+  activeNotice = { message, isError, action, project: projectId };
+  applyActiveNotice();
+  if (!sticky && !action) noticeTimer = setTimeout(dismissNotice, 9000);
 }
 
 function applyBusy() {
@@ -480,22 +577,24 @@ function applyBusy() {
 }
 
 let fixingDocker = false;
-const DISK_COMMANDS = ["Commands you can run in Terminal to free space:", "  docker system prune -af        # unused images and build cache (needs Docker running)", "  npm cache clean --force", "  bun pm cache rm", "  brew cleanup -s", "  rm -rf ~/Library/Caches/*"].join("\n");
+// Each command only removes caches that tools rebuild on demand. Nothing here deletes project files.
+const DISK_COMMANDS = ["Commands you can run in Terminal to free space:", "  docker system prune            # stopped containers, dangling images and build cache (volumes are kept; needs Docker running)", "  npm cache clean --force", "  bun pm cache rm", "  brew cleanup -s"].join("\n");
 
 async function fixDockerAndRetry(button) {
   if (fixingDocker) return;
   fixingDocker = true;
-  showNotice("Restarting Docker Desktop… this usually takes 30–90 seconds. The start will continue automatically once Docker answers.", false, true);
+  const projectId = button.dataset.project;
+  showNotice("Restarting Docker Desktop… this usually takes 30–90 seconds. The start will continue automatically once Docker answers.", false, true, null, projectId);
   try {
     const result = await api("/api/docker/restart", { method: "POST", body: "{}" });
     if (!result.ok) {
       return result.lowDisk
-        ? showNotice(`${result.message}\n\n${DISK_COMMANDS}`, true, true, { label: "Free up space…", run: openDiskCleanup })
-        : showNotice(result.message, true, true);
+        ? showNotice(`${result.message}\n\n${DISK_COMMANDS}`, true, true, { label: "Free up space…", run: openDiskCleanup }, projectId)
+        : showNotice(result.message, true, true, null, projectId);
     }
-    showNotice("Docker is running again. Continuing…", false, true);
+    showNotice("Docker is running again. Continuing…", false, false, null, projectId);
   } catch (error) {
-    return showNotice(`Could not restart Docker: ${error.message}`, true, true);
+    return showNotice(`Could not restart Docker: ${error.message}`, true, true, null, projectId);
   } finally {
     fixingDocker = false;
   }
@@ -509,7 +608,7 @@ async function handleAction(button) {
   if (action === "logs") {
     const view = { project, name, owner: projects.find((entry) => entry.id === project), lines: [] };
     logView = view;
-    document.querySelector("#log-title").textContent = `Recent logs · ${name}`;
+    document.querySelector("#log-title").textContent = `Recent logs · ${view.owner?.name ? `${view.owner.name} · ` : ""}${name}`;
     document.querySelector("#log-body").textContent = "Loading…";
     renderLogAi();
     document.querySelector("#logs").showModal();
@@ -517,7 +616,10 @@ async function handleAction(button) {
       const result = await api(`/api/logs?project=${encodeURIComponent(project)}&resource=${encodeURIComponent(name)}`);
       if (logView !== view) return;
       view.lines = (result.lines || []).map((line) => line.text || JSON.stringify(line));
-      document.querySelector("#log-body").textContent = view.lines.join("\n") || "No recent logs.";
+      const body = document.querySelector("#log-body");
+      body.textContent = view.lines.join("\n") || "No recent logs.";
+      // The newest lines are at the bottom, so start there.
+      body.scrollTop = body.scrollHeight;
       renderLogAi();
     } catch (error) {
       if (logView === view) document.querySelector("#log-body").textContent = error.message;
@@ -537,11 +639,17 @@ async function handleAction(button) {
   if (action === "doctor-refresh") {
     doctors.delete(project);
     render();
-    try { doctors.set(project, await api(`/api/doctor?project=${encodeURIComponent(project)}&refresh=1`)); } catch (error) { doctors.set(project, { error: error.message }); }
+    try { doctors.set(project, { ...(await api(`/api/doctor?project=${encodeURIComponent(project)}&refresh=1`)), at: Date.now() }); } catch (error) { doctors.set(project, { error: error.message, at: Date.now() }); }
     render();
     return;
   }
 
+  // Stop and Restart take down every resource in the project, so ask first.
+  if (scope === "project" && (action === "stop" || action === "restart")) {
+    const projectName = projects.find((entry) => entry.id === project)?.name || "this project";
+    const question = action === "stop" ? `Stop every resource in ${projectName}?` : `Restart every resource in ${projectName}?`;
+    if (!window.confirm(question)) return;
+  }
   busy.add(project);
   applyBusy();
   try {
@@ -558,8 +666,8 @@ async function handleAction(button) {
       // Offer to fix Docker and then carry on with the original action.
       showNotice(error.lowDisk ? `${error.message}\n\n${DISK_COMMANDS}` : error.message, true, true, error.lowDisk
         ? { label: "Free up space…", run: openDiskCleanup }
-        : { label: "Restart Docker and continue", run: () => fixDockerAndRetry(button) });
-    } else showNotice(error.message, true);
+        : { label: "Restart Docker and continue", run: () => fixDockerAndRetry(button) }, project);
+    } else showNotice(error.message, true, false, null, project);
   } finally {
     busy.delete(project);
     render();
@@ -608,8 +716,10 @@ async function pollJobs() {
       const key = `${job.project}:${job.id ?? "external"}:${job.state}`;
       if (!ACTIVE.has(job.state) && before && ACTIVE.has(before.state) && !announced.has(key)) {
         announced.add(key);
-        if (job.state === "failed") showNotice(`${name}: ${job.message || "the action failed."}`, true);
-        else showNotice(`${name}: ${job.progress?.percent === 100 ? "all resources are ready." : job.message || "done."}`);
+        // The health score was measured before this change, so measure it again.
+        doctors.delete(job.project);
+        if (job.state === "failed") showNotice(`${name}: ${job.message || "the action failed."}`, true, false, null, job.project);
+        else showNotice(`${name}: ${job.progress?.percent === 100 ? "all resources are ready." : job.message || "done."}`, false, false, null, job.project);
         void refreshData();
       }
     }
@@ -666,10 +776,36 @@ content.addEventListener("click", (event) => {
   toggle.setAttribute("aria-expanded", String(open));
   if (open) closedStacks.delete(stack.dataset.key);
   else closedStacks.add(stack.dataset.key);
+  saveState();
 });
+
+// Copy buttons next to suggested fix commands.
+content.addEventListener("click", (event) => {
+  const copy = event.target.closest("[data-copy]");
+  if (!copy) return;
+  navigator.clipboard.writeText(copy.dataset.copy).then(() => {
+    copy.textContent = "Copied";
+    setTimeout(() => { copy.textContent = "Copy"; }, 1500);
+  }, () => showNotice("Could not copy. Select the command and copy it by hand.", true));
+});
+
+// <details> open state survives the periodic re-render (the element is rebuilt, so restore it from openDetails).
+document.addEventListener("toggle", (event) => {
+  const details = event.target;
+  if (details.tagName !== "DETAILS" || !details.dataset.key) return;
+  if (details.open) openDetails.add(details.dataset.key); else openDetails.delete(details.dataset.key);
+}, true);
 
 search.addEventListener("input", () => {
   searchTerm = search.value.trim();
+  render();
+});
+
+// The narrow-window filter sits in the page itself, because the sidebar is hidden there.
+content.addEventListener("input", (event) => {
+  if (event.target.id !== "content-search") return;
+  search.value = event.target.value;
+  searchTerm = event.target.value.trim();
   render();
 });
 
@@ -677,7 +813,15 @@ document.querySelector("#overview-nav").addEventListener("click", () => {
   selectedProjectId = null;
   render();
 });
-document.querySelector("#refresh").addEventListener("click", refreshData);
+document.querySelector("#refresh").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  try { await refreshData(); } finally {
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+  }
+});
 document.querySelector("#close-logs").addEventListener("click", () => document.querySelector("#logs").close());
 
 // The switch lives at the top of the logs dialog. Turning it on or off applies to every panel.
@@ -743,14 +887,19 @@ function fieldMarkup(field) {
 function openForm({ title, intro = "", fields, submit, validate, run }) {
   formDialog.innerHTML = `<form class="form" novalidate>
     <div class="modal-head"><h2>${esc(title)}</h2><button class="button quiet" type="button" data-close>Close</button></div>
-    <div class="form-body">${intro ? `<p class="form-intro">${esc(intro)}</p>` : ""}${fields.map(fieldMarkup).join("")}<div class="form-error" role="alert" hidden></div><pre class="form-output" hidden></pre></div>
+    <div class="form-body">${intro ? `<p class="form-intro">${esc(intro)}</p>` : ""}<div class="form-error" role="alert" tabindex="-1" hidden></div>${fields.map(fieldMarkup).join("")}<pre class="form-output" hidden></pre></div>
     <div class="form-foot"><button class="button" type="button" data-close>Cancel</button><button class="button primary" type="submit">${esc(submit)}</button></div></form>`;
   const form = formDialog.querySelector("form");
   const errorBox = form.querySelector(".form-error");
   const output = form.querySelector(".form-output");
   const submitButton = form.querySelector('[type="submit"]');
   let finished = false;
-  const fail = (message) => { errorBox.textContent = message; errorBox.hidden = false; };
+  // The error sits at the top of the form and takes focus, so it is read out and not missed below the fields.
+  const fail = (message) => {
+    errorBox.textContent = message;
+    errorBox.hidden = false;
+    errorBox.focus();
+  };
   for (const close of form.querySelectorAll("[data-close]")) close.addEventListener("click", () => formDialog.close());
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -789,6 +938,7 @@ function openForm({ title, intro = "", fields, submit, validate, run }) {
   form.querySelector("input, select")?.focus();
 }
 
+const portProblem = (value) => (!value || (Number.isInteger(Number(value)) && Number(value) >= 1 && Number(value) <= 65535) ? "" : "Port must be a whole number from 1 to 65535.");
 const kebabProblem = (label, value) => (KEBAB.test(value) ? "" : `${label} must be lowercase letters, numbers and dashes, starting with a letter (for example my-api).`);
 const post = (url, body) => api(url, { method: "POST", body: JSON.stringify(body) });
 
@@ -831,11 +981,11 @@ async function handleCrud(action, projectId, name, dataset) {
         { name: "name", label: "Name", placeholder: "my-api", hint: "Lowercase, dashes allowed." },
         { name: "type", label: "Type", type: "select", value: "backend", options: info.resourceTypes.map((type) => ({ value: type, label: type })) },
         { name: "stack", label: "Stack (optional)", placeholder: "default", list: stackNames },
-        { name: "framework", label: "Framework (optional)", placeholder: "hono, react, …" },
-        { name: "port", label: "Port (optional)", type: "number", hint: "Leave empty to use the next free port." },
+        { name: "framework", label: "Framework (optional)", placeholder: "hono", hint: "One name in lowercase, such as hono or react." },
+        { name: "port", label: "Port (optional)", type: "number", placeholder: "4000–5999", hint: "Leave empty to use the next free port. Valid ports are 1 to 65535." },
       ],
       submit: "Create resource",
-      validate: (v) => kebabProblem("Name", v.name) || (v.stack && kebabProblem("Stack", v.stack)) || (v.framework && kebabProblem("Framework", v.framework)) || "",
+      validate: (v) => kebabProblem("Name", v.name) || (v.stack && kebabProblem("Stack", v.stack)) || (v.framework && kebabProblem("Framework", v.framework)) || portProblem(v.port) || "",
       run: (v) => post("/api/resources", { project: projectId, name: v.name, type: v.type, stack: v.stack || undefined, framework: v.framework || undefined, port: v.port ? Number(v.port) : undefined }),
     });
     return true;
@@ -876,7 +1026,7 @@ async function openNewProject() {
     fields: [
       { name: "name", label: "Folder name", placeholder: "my-shop" },
       { name: "template", label: "Template", type: "select", value: "", options: [{ value: "", label: "Blank project" }, ...info.templates.map((template) => ({ value: template, label: template }))] },
-      { name: "parent", label: "Create inside", value: info.defaultParent, list: info.roots, hint: "A folder inside your home directory. ~ means your home folder." },
+      { name: "parent", label: "Create inside", value: info.defaultParent, list: info.roots, hint: "The folder the new project folder is created in. ~ means your home folder." },
     ],
     submit: "Create project",
     validate: (v) => kebabProblem("Folder name", v.name) || (v.parent ? "" : "Choose a folder."),
@@ -924,13 +1074,33 @@ async function openDiskCleanup() {
 }
 
 // Popover menus: toggle on click, close on outside click or Escape.
+function setMenuOpen(trigger, open) {
+  const menu = trigger.nextElementSibling;
+  menu.hidden = !open;
+  trigger.setAttribute("aria-expanded", String(open));
+  if (open) menu.querySelector('[role="menuitem"]')?.focus();
+}
 document.addEventListener("click", (event) => {
   const trigger = event.target.closest("[data-menu]");
-  for (const menu of document.querySelectorAll(".menu:not([hidden])")) if (!trigger || menu.previousElementSibling !== trigger) menu.hidden = true;
-  if (trigger) { const menu = trigger.nextElementSibling; menu.hidden = !menu.hidden; event.stopPropagation(); }
-  else if (event.target.closest(".menu [data-action]")) event.target.closest(".menu").hidden = true;
+  for (const menu of document.querySelectorAll(".menu:not([hidden])")) {
+    if (!trigger || menu.previousElementSibling !== trigger) setMenuOpen(menu.previousElementSibling, false);
+  }
+  if (trigger) { setMenuOpen(trigger, trigger.nextElementSibling.hidden); event.stopPropagation(); }
+  else if (event.target.closest(".menu [data-action]")) setMenuOpen(event.target.closest(".menu").previousElementSibling, false);
 }, true);
-document.addEventListener("keydown", (event) => { if (event.key === "Escape") for (const menu of document.querySelectorAll(".menu")) menu.hidden = true; });
+// Escape closes an open menu and returns focus to its button. Arrow keys move between the items.
+document.addEventListener("keydown", (event) => {
+  const openMenu = document.querySelector(".menu:not([hidden])");
+  if (!openMenu) return;
+  const trigger = openMenu.previousElementSibling;
+  if (event.key === "Escape") { setMenuOpen(trigger, false); trigger.focus(); return; }
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  const items = [...openMenu.querySelectorAll('[role="menuitem"]')];
+  const index = items.indexOf(document.activeElement);
+  const next = event.key === "ArrowDown" ? (index + 1) % items.length : (index - 1 + items.length) % items.length;
+  items[next]?.focus();
+  event.preventDefault();
+});
 
 // ---------- Config & drift panel ----------
 const configState = new Map(); // projectId -> { status, entries, loading, error }
@@ -957,9 +1127,15 @@ async function runConfig(projectId, operation, { quiet = false } = {}) {
   try {
     const result = await post("/api/config", { project: projectId, operation });
     const entries = result.entry ? [result.entry, ...(current.entries ?? [])].slice(0, 50) : current.entries ?? [];
-    const status = operation === "verify" && result.entry ? { ok: result.entry.ok, at: result.entry.at, exitCode: result.entry.exitCode } : current.status ?? null;
+    // Only a drift check says whether files are in sync. Regenerate and Migrate rewrite files, so the last check no longer applies.
+    const status = operation === "verify" && result.entry ? { ok: result.entry.ok, at: result.entry.at, exitCode: result.entry.exitCode } : null;
     configState.set(projectId, { status, entries, loading: false, running: null, error: "" });
-    if (!quiet) showNotice(`${{ verify: "Drift check", migrate: "Migration", regenerate: "Regenerate" }[operation]} ${result.ok ? "finished" : "reported a problem"}. See the log below.`, !result.ok);
+    if (!quiet) {
+      const message = operation === "verify"
+        ? (result.ok ? "Drift check: in sync." : "Drift check: drift found, or the check failed. See the log below.")
+        : `${{ migrate: "Migration", regenerate: "Regenerate" }[operation]} ${result.ok ? "finished" : "reported a problem"}. Run Check now to confirm the files are in sync.`;
+      showNotice(message, !result.ok);
+    }
   } catch (error) {
     configState.set(projectId, { ...current, loading: false, running: null, error: error.message });
   }
@@ -968,20 +1144,24 @@ async function runConfig(projectId, operation, { quiet = false } = {}) {
 
 function driftBadge(status) {
   if (!status) return `<span class="badge none">Not checked yet</span>`;
-  return status.ok ? `<span class="badge good">In sync</span>` : `<span class="badge bad">Drift or error</span>`;
+  // The last check exited non-zero. Its output in the log says whether files drifted or the check itself failed.
+  return status.ok ? `<span class="badge good">In sync</span>` : `<span class="badge bad" title="Last check exited with code ${esc(status.exitCode ?? "unknown")}. See the log.">Not in sync</span>`;
 }
 
 function configSection(project) {
   const state = configState.get(project.id);
-  if (!state) void loadConfig(project.id, { checkIfNever: true });
+  // Opening a project only reads the last saved check. A check runs when the user asks for one.
+  if (!state) void loadConfig(project.id);
   const busy = state?.loading;
   const status = state?.status ?? null;
   const entries = state?.entries ?? [];
   const when = status?.at ? new Date(status.at).toLocaleString() : "";
   const right = `<button class="link-btn" type="button" data-config="verify" data-project="${esc(project.id)}" ${busy ? "disabled" : ""}>${busy && state?.running === "verify" ? "Checking…" : "Check now"}</button><button class="link-btn" type="button" data-config="migrate" data-project="${esc(project.id)}" ${busy ? "disabled" : ""}>Migrate schema</button><button class="link-btn" type="button" data-config="regenerate" data-project="${esc(project.id)}" ${busy ? "disabled" : ""}>Regenerate</button>`;
   const log = entries.length
-    ? entries.slice(0, 20).map((entry) => `<details class="log-entry ${entry.ok ? "ok" : "fail"}"><summary><span class="log-when">${esc(new Date(entry.at).toLocaleString())}</span><span class="log-action">${esc(entry.action)}</span><span class="log-exit">exit ${entry.exitCode ?? "—"}</span><span class="log-ms">${(entry.durationMs / 1000).toFixed(1)}s</span></summary><pre>${esc(entry.output || "(no output)")}</pre>${entry.ok ? "" : inspectRow(TDK_INSPECT.runPrompt({ project: project.name, path: project.path, action: entry.action, exitCode: entry.exitCode, output: entry.output }))}</details>`).join("")
-    : `<div class="log-empty">No config runs yet. ${state?.error ? esc(state.error) : "Run a check to see its output here."}</div>`;
+    ? entries.slice(0, 20).map((entry) => `<details class="log-entry ${entry.ok ? "ok" : "fail"}" data-key="log/${esc(entry.id ?? entry.at)}"${openDetails.has(`log/${entry.id ?? entry.at}`) ? " open" : ""}><summary><span class="log-when">${esc(new Date(entry.at).toLocaleString())}</span><span class="log-action">${esc(entry.action)}</span><span class="log-exit">exit ${entry.exitCode ?? "—"}</span><span class="log-ms">${(entry.durationMs / 1000).toFixed(1)}s</span></summary><pre>${esc(entry.output || "(no output)")}</pre>${entry.ok ? "" : inspectRow(TDK_INSPECT.runPrompt({ project: project.name, path: project.path, action: entry.action, exitCode: entry.exitCode, output: entry.output }))}</details>`).join("")
+    : state?.error
+      ? `<div class="notice show error">${esc(state.error)}</div>`
+      : `<div class="log-empty">No config runs yet. Run a check to see its output here.</div>`;
   const body = `<div class="config-box"><div class="config-summary">${driftBadge(status)}<span class="config-when">${status ? `Last checked ${esc(when)}` : busy ? "Checking…" : ""}</span></div>${state?.error && entries.length ? `<div class="notice show error">${esc(state.error)}</div>` : ""}<div class="log-title">Run log</div><div class="log-list">${log}</div></div>`;
   return collapsible("config", "Config & drift", body, right);
 }

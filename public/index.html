@@ -92,6 +92,15 @@
       .state-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--tertiary); }
       .state-dot.ready { background: var(--green); }
       .state-dot.error { background: var(--red); }
+      .state-dot.pending { background: var(--amber); }
+      .row-dot { display: none; }
+      .narrow-search { display: none; margin: 0 0 14px; }
+      .narrow-search input { width: 100%; height: 32px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface); padding: 0 10px; color: var(--label); font: 13px var(--sans); }
+      .scope-note { color: var(--tertiary); font-size: 11px; margin-right: 6px; }
+      .fix-row { display: flex; align-items: center; gap: 8px; }
+      .fix-row code { flex: 1; min-width: 0; }
+      .copy-btn { flex: 0 0 auto; }
+      .notice-close { margin-left: 12px; border: 0; background: transparent; color: inherit; font-size: 16px; line-height: 1; padding: 0 4px; border-radius: 4px; cursor: pointer; }
       .sidebar-foot { margin-top: auto; padding: 12px 16px; color: var(--tertiary); border-top: 1px solid var(--line-soft); font-size: 10px; }
       .main { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
       .toolbar { height: 58px; flex: 0 0 58px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 28px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface) 72%, transparent); }
@@ -187,24 +196,32 @@
         .toolbar { padding-inline: 18px; }
         .content { padding-inline: 18px; }
         .project-row { grid-template-columns: minmax(180px, 1fr) minmax(100px, .55fr) auto; }
-        .row-meta.resources-count { display: none; }
+        .row-meta.resources-count .res-text { display: none; }
+        .row-meta.resources-count:empty { display: none; }
       }
       @media (max-width: 640px) {
         body { min-height: 420px; }
         .app { grid-template-columns: 1fr; }
         .sidebar { display: none; }
+        .narrow-search { display: block; }
         .toolbar { height: 50px; flex-basis: 50px; padding-inline: 14px; }
         .content { padding: 21px 13px 32px; }
         .page-head { align-items: flex-start; flex-direction: column; gap: 14px; }
         .summary { width: 100%; justify-content: space-between; }
         .stat { flex: 1; }
         .project-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
-        .project-row > .status-label, .project-row > .row-meta { display: none; }
+        .project-row > .status-label { display: none; }
+        .project-row > .row-meta .res-text { display: none; }
+        .project-row > .row-meta:empty { display: none; }
+        .row-dot { display: block; position: absolute; right: -2px; bottom: -2px; box-shadow: 0 0 0 2px var(--surface); }
+        .project-symbol { position: relative; }
         .row-actions .button { padding-inline: 6px; }
         .detail-head { flex-direction: column; }
         .detail-actions { justify-content: flex-start; }
         .resource-row { grid-template-columns: minmax(110px, .8fr) auto; gap: 6px; padding-left: 14px; }
-        .resource-row > .status-label, .resource-row > .resource-url { display: none; }
+        .resource-row > .status-label { display: none; }
+        .resource-row > .resource-url { grid-column: 1 / -1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .resource-name .row-dot { display: inline-block; position: static; margin-right: 6px; vertical-align: middle; box-shadow: none; }
       }
 
       /* Theme: Codex layout, Claude warmth and type. Sizes and contrast chosen for readability. */
@@ -613,7 +630,7 @@
       .detail-head { align-items: flex-start; }
       .detail-actions { flex-wrap: nowrap; align-items: center; gap: 4px; }
       .detail-title h1 { font-size: 26px; }
-      .resource-actions, .stack-quick { gap: 2px; opacity: .55; transition: opacity .12s ease; }
+      .resource-actions, .stack-quick { gap: 2px; opacity: 1; transition: opacity .12s ease; }
       .resource-row:hover .resource-actions, .stack-head:hover .stack-quick, .resource-actions:focus-within, .stack-quick:focus-within { opacity: 1; }
       .menu-wrap { position: relative; }
       .menu { position: absolute; right: 0; top: 32px; z-index: 30; min-width: 200px; padding: 5px; border-radius: 8px; background: color-mix(in srgb, var(--surface) 82%, transparent); backdrop-filter: blur(30px) saturate(1.8); -webkit-backdrop-filter: blur(30px) saturate(1.8); box-shadow: 0 0 0 .5px var(--line), 0 10px 30px rgba(0, 0, 0, .25); }
@@ -907,7 +924,7 @@
           <label class="search"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="8.8" cy="8.8" r="5.8" stroke="currentColor" stroke-width="1.5"/><path d="m13.2 13.2 4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><input id="search" type="search" placeholder="Filter projects" autocomplete="off" /></label>
         </div>
         <nav class="side-nav"><button id="overview-nav" class="nav-item active" type="button" title="Overview"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><rect x="2.5" y="2.5" width="6.2" height="6.2" rx="1.4" stroke="currentColor" stroke-width="1.4"/><rect x="11.3" y="2.5" width="6.2" height="6.2" rx="1.4" stroke="currentColor" stroke-width="1.4"/><rect x="2.5" y="11.3" width="6.2" height="6.2" rx="1.4" stroke="currentColor" stroke-width="1.4"/><rect x="11.3" y="11.3" width="6.2" height="6.2" rx="1.4" stroke="currentColor" stroke-width="1.4"/></svg><span class="nav-label">Overview</span><span id="nav-count" class="count">—</span></button><button id="new-project-nav" class="nav-item" type="button" title="New project"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 4v12M4 10h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg><span class="nav-label">New project</span></button></nav>
-        <button id="ws-toggle" class="section-title section-toggle" type="button" aria-expanded="true"><svg class="chevron" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m6 3 5 5-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Workspaces <span id="side-count" class="count">—</span></button>
+        <button id="ws-toggle" class="section-title section-toggle" type="button" aria-expanded="true"><svg class="chevron" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m6 3 5 5-5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Projects <span id="side-count" class="count">—</span></button>
         <div id="project-list" class="project-list"><div class="skel-side" aria-label="Finding projects"><i></i><i></i><i></i><i></i></div></div>
         <div class="sidebar-foot">Local projects · refreshes every 7 seconds</div>
       </aside>
