@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
+import { tokenSavings } from "./token-savings.js";
 
 const PROJECT_FILE = join(".tdk", "project.json");
 const PORT_FILE = join(".tdk", ".tdk-out", "tilt-port.json");
@@ -16,7 +17,10 @@ const SCAN_SKIP_NAMES = new Set([
   ".cache", ".npm", ".bun", ".venv", "venv", ".tox", "Pods", "DerivedData",
 ]);
 const HTML = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
-const CLIENT_SCRIPT = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+const CLIENT_SCRIPTS = new Map([
+  ["/app.js", readFileSync(new URL("../public/app.js", import.meta.url), "utf8")],
+  ["/inspect.js", readFileSync(new URL("../public/inspect.js", import.meta.url), "utf8")],
+]);
 
 export function discoverProjectRoot(start = process.cwd()) {
   let directory = resolve(start);
@@ -232,7 +236,10 @@ export function normalizeState(raw) {
     pins: { projects: cleanList(pins.projects), resources: cleanList(pins.resources) },
     hidden: cleanList(value.hidden),
     collapsed: cleanList(value.collapsed),
+    closedStacks: cleanList(value.closedStacks),
     knownRoots: cleanList(value.knownRoots),
+    // Off unless the user turned it on: logs and doctor output are only offered to an AI service after an explicit opt-in.
+    aiInspect: value.aiInspect === true,
   };
 }
 
@@ -534,7 +541,7 @@ function findConflicts(snapshots) {
   return [...owners].filter(([, claimants]) => claimants.length > 1).map(([port, claimants]) => ({ port, claimants }));
 }
 
-export function startAppServer({ projects, projectsReady = Promise.resolve(), probe = probeCli, host = "127.0.0.1", port = 0, token = randomBytes(32).toString("hex"), runCommand = runTdk, openPath = openProjectPath, dockerCheck = checkDocker, dockerRestart = restartDockerDesktop, prewarm = false, statePath = null }) {
+export function startAppServer({ projects, projectsReady = Promise.resolve(), probe = probeCli, host = "127.0.0.1", port = 0, token = randomBytes(32).toString("hex"), runCommand = runTdk, openPath = openProjectPath, claudeDesktopApp = findClaudeDesktopApp, openAiApp = openInClaudeApp, dockerCheck = checkDocker, dockerRestart = restartDockerDesktop, prewarm = false, statePath = null }) {
   if (host !== "127.0.0.1") throw new Error("TDK App can only bind to 127.0.0.1.");
   let capability = null;
   let updating = false;
@@ -666,13 +673,13 @@ export function startAppServer({ projects, projectsReady = Promise.resolve(), pr
         });
         return response.end(HTML.replace("__TDK_CENTER_TOKEN__", token).replaceAll("tdk center", "tdk-app"));
       }
-      if (url.pathname === "/app.js" && request.method === "GET") {
+      if (CLIENT_SCRIPTS.has(url.pathname) && request.method === "GET") {
         response.writeHead(200, {
           "content-type": "text/javascript; charset=utf-8",
           "cache-control": "no-store",
           "x-content-type-options": "nosniff",
         });
-        return response.end(CLIENT_SCRIPT);
+        return response.end(CLIENT_SCRIPTS.get(url.pathname));
       }
       if (!url.pathname.startsWith("/api/")) return sendJson(response, 404, { error: "Not found." });
       if (!sameSecret(request.headers["x-tdk-token"]?.toString() ?? "", token)) return sendJson(response, 403, { error: "Invalid session token." });
@@ -734,6 +741,7 @@ export function startAppServer({ projects, projectsReady = Promise.resolve(), pr
             resources: snapshot.resources,
             stacks: snapshot.stacks,
             ports: snapshot.ports.map((port) => ({ name: port.name, port: port.hostPort })),
+            ...(snapshot.pending ? {} : { tokens: tokenSavings(snapshot.project.root) }),
             conflicts: conflicts.filter((conflict) => conflict.claimants.some((claimant) => claimant.projectId === snapshot.project.id)).map((conflict) => ({
               port: conflict.port,
               claimants: conflict.claimants.map((claimant) => claimant.label),
@@ -900,7 +908,9 @@ export function startAppServer({ projects, projectsReady = Promise.resolve(), pr
         const entry = { id: randomBytes(6).toString("hex"), at: new Date().toISOString(), project: project.id, name: project.name, action: body.operation, ok: result.ok, exitCode: raw.status ?? null, durationMs: Date.now() - started, output: result.output };
         configLogs.unshift(entry);
         if (configLogs.length > CONFIG_LOG_LIMIT) configLogs.length = CONFIG_LOG_LIMIT;
+        // Regenerate and Migrate rewrite files, so an earlier drift check no longer describes them.
         if (body.operation === "verify") lastVerify.set(project.id, { ok: result.ok, at: entry.at, exitCode: entry.exitCode });
+        else lastVerify.delete(project.id);
         return sendJson(response, 200, { ...result, entry });
       }
       if (url.pathname === "/api/state" && request.method === "GET") {
@@ -947,6 +957,15 @@ export function startAppServer({ projects, projectsReady = Promise.resolve(), pr
         }
         return sendJson(response, 200, { ...result, ok: false, output: result.output || "TDK did not create a project here." });
       }
+      if (url.pathname === "/api/ai/build" && request.method === "POST") {
+        // Tries the Claude desktop app first. When it is not installed the client falls back to the web chats.
+        const body = await readBody(request);
+        if (typeof body.prompt !== "string" || !body.prompt || body.prompt.length > CLAUDE_PROMPT_LIMIT) return sendJson(response, 400, { error: "Choose a starter prompt of up to 14,000 characters." });
+        const app = claudeDesktopApp();
+        if (!app) return sendJson(response, 200, { ok: true, opened: null });
+        await openAiApp(app, body.prompt);
+        return sendJson(response, 200, { ok: true, opened: "claude-desktop" });
+      }
       if (url.pathname === "/api/open" && request.method === "POST") {
         const body = await readBody(request);
         const project = typeof body.project === "string" ? projects.find((entry) => entry.id === body.project) : null;
@@ -981,6 +1000,23 @@ export function openProjectPath(root, kind) {
   else if (process.platform === "win32") [command, args] = ["wt.exe", ["-d", root]];
   else [command, args] = ["x-terminal-emulator", ["--working-directory", root]];
   return spawnDetached(command, args, root, process.platform === "win32");
+}
+
+// Claude's own chat route takes the prompt in `q` and caps it at 14,336 characters.
+export const CLAUDE_PROMPT_LIMIT = 14_336;
+
+// Only macOS is checked, since that is where the Claude app's install location was verified. Other platforms get no desktop option.
+export function findClaudeDesktopApp(platform = process.platform, exists = existsSync, home = homedir()) {
+  if (platform !== "darwin") return null;
+  for (const candidate of ["/Applications/Claude.app", join(home, "Applications", "Claude.app")]) {
+    if (exists(candidate)) return candidate;
+  }
+  return null;
+}
+
+// `open -a <app> <url>` hands the claude:// link to the app at the path we found, not to whichever app claims the scheme.
+export function openInClaudeApp(app, prompt) {
+  return spawnDetached("open", ["-a", app, `claude://claude.ai/new?q=${encodeURIComponent(prompt)}`]);
 }
 
 export function openBrowser(url) {

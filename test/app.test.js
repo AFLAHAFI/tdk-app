@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
-import { commonProjectScanRoots, discoverProjectRoot, discoverProjects, probeCli, resolveProjects, startAppServer } from "../src/app.js";
+import { commonProjectScanRoots, discoverProjectRoot, discoverProjects, findClaudeDesktopApp, normalizeState, probeCli, resolveProjects, startAppServer } from "../src/app.js";
 
 const servers = [];
 const tempDirs = [];
@@ -156,10 +156,16 @@ describe("TDK App local server", () => {
     const started = await serverFor({ projects, runCommand });
     const pageResponse = await fetch(started.url);
     assert.equal(pageResponse.status, 200);
-    assert.match(await pageResponse.text(), /<script src="\/app\.js" defer><\/script>/);
+    const pageText = await pageResponse.text();
+    assert.match(pageText, /<script src="\/app\.js" defer><\/script>/);
+    assert.match(pageText, /<script src="\/inspect\.js" defer><\/script>/);
     const scriptResponse = await fetch(new URL("/app.js", started.url));
     assert.equal(scriptResponse.status, 200);
     assert.match(await scriptResponse.text(), /function refreshData/);
+    const inspectResponse = await fetch(new URL("/inspect.js", started.url));
+    assert.equal(inspectResponse.status, 200);
+    assert.match(inspectResponse.headers.get("content-type"), /text\/javascript/);
+    assert.match(await inspectResponse.text(), /const TDK_INSPECT/);
     const response = await fetch(new URL("/api/projects", started.url), {
       headers: { "x-tdk-token": started.token },
     });
@@ -200,5 +206,59 @@ describe("TDK App local server", () => {
     assert.equal((await send({ project: "a", operation: "stop", stack: "shop" })).status, 400);
     assert.equal((await send({ project: "a", operation: "restart", resources: ["api"] })).status, 400);
     assert.equal(calls.length, 0);
+  });
+});
+
+describe("persistent UI state", () => {
+  it("keeps closed stacks across launches", () => {
+    const state = normalizeState({ closedStacks: ["proj/core", 42, "proj/jobs"] });
+    assert.deepEqual(state.closedStacks, ["proj/core", "proj/jobs"]);
+  });
+});
+
+describe("Build with AI", () => {
+  it("finds the Claude app only on macOS, in /Applications or ~/Applications", () => {
+    const home = "/Users/someone";
+    assert.equal(findClaudeDesktopApp("linux", () => true, home), null);
+    assert.equal(findClaudeDesktopApp("darwin", () => false, home), null);
+    assert.equal(findClaudeDesktopApp("darwin", (path) => path === "/Applications/Claude.app", home), "/Applications/Claude.app");
+    assert.equal(findClaudeDesktopApp("darwin", (path) => path === "/Users/someone/Applications/Claude.app", home), "/Users/someone/Applications/Claude.app");
+  });
+
+  it("opens the starter prompt in the Claude app when it is installed", async () => {
+    const opened = [];
+    const started = await serverFor({ projects: [], claudeDesktopApp: () => "/Applications/Claude.app", openAiApp: async (app, prompt) => { opened.push([app, prompt]); } });
+    const response = await fetch(new URL("/api/ai/build", started.url), {
+      method: "POST",
+      headers: { "x-tdk-token": started.token, origin: new URL(started.url).origin, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "Build an app with TDK" }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true, opened: "claude-desktop" });
+    assert.deepEqual(opened, [["/Applications/Claude.app", "Build an app with TDK"]]);
+  });
+
+  it("reports no desktop app, so the client shows the web chats, and opens nothing", async () => {
+    const opened = [];
+    const started = await serverFor({ projects: [], claudeDesktopApp: () => null, openAiApp: async () => { opened.push(true); } });
+    const response = await fetch(new URL("/api/ai/build", started.url), {
+      method: "POST",
+      headers: { "x-tdk-token": started.token, origin: new URL(started.url).origin, "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "Build an app with TDK" }),
+    });
+    assert.deepEqual(await response.json(), { ok: true, opened: null });
+    assert.equal(opened.length, 0);
+  });
+
+  it("refuses an empty or oversized prompt", async () => {
+    const started = await serverFor({ projects: [], claudeDesktopApp: () => "/Applications/Claude.app", openAiApp: async () => {} });
+    for (const body of [{ prompt: "" }, { prompt: "x".repeat(14_337) }]) {
+      const response = await fetch(new URL("/api/ai/build", started.url), {
+        method: "POST",
+        headers: { "x-tdk-token": started.token, origin: new URL(started.url).origin, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      assert.equal(response.status, 400);
+    }
   });
 });
