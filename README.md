@@ -68,7 +68,7 @@ The package is not published yet; use the checkout instructions above until a re
 npm test
 ```
 
-The sidebar accessibility checks run separately in Chromium:
+The accessibility checks run separately in Chromium:
 
 ```sh
 npm install
@@ -76,7 +76,6 @@ npx playwright install chromium
 npm run test:browser
 ```
 
-They check initial and restored layouts, mouse and keyboard toggles, and saved state
-after reload. The fixture server does not start TDK projects or open external apps.
+They cover the sidebar toggle state and dialog names. They use a local fixture server and do not start TDK projects or open external apps.
 
 The server uses Node.js built-ins only. Set `TDK_BIN` to the path of a TDK CLI executable if it is not named `tdk` or is not on `PATH`.
