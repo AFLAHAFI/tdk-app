@@ -29,17 +29,15 @@ beforeEach(async () => {
 });
 
 test("logs dialog uses its current visible title as its accessible name", async () => {
-  await page.evaluate(() => {
-    document.querySelector("#log-title").textContent = "Recent logs · shop · api";
-    document.querySelector("#logs").showModal();
-  });
-  assert.equal(await page.getByRole("dialog", { name: "Recent logs · shop · api", exact: true }).count(), 1);
-  await page.evaluate(() => {
-    document.querySelector("#logs").close();
-    document.querySelector("#log-title").textContent = "Recent logs · shop · worker";
-    document.querySelector("#logs").showModal();
-  });
-  assert.equal(await page.getByRole("dialog", { name: "Recent logs · shop · worker", exact: true }).count(), 1);
+  // Open through the app's own logs action so the title is set by the real code path.
+  for (const name of ["api", "worker"]) {
+    await page.evaluate((name) => {
+      document.querySelector("#logs").close();
+      handleAction({ dataset: { action: "logs", project: "shop", name } });
+    }, name);
+    await page.locator("#logs[open]").waitFor();
+    assert.equal(await page.getByRole("dialog", { name: `Recent logs · ${name}`, exact: true }).count(), 1);
+  }
 });
 
 test("new-project form is named by its heading", async () => {
