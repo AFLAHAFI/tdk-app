@@ -68,4 +68,14 @@ The package is not published yet; use the checkout instructions above until a re
 npm test
 ```
 
+The dialog accessibility checks run separately in Chromium:
+
+```sh
+npm install
+npx playwright install chromium
+npm run test:browser
+```
+
+They use a local fixture server and do not start TDK projects or open external apps.
+
 The server uses Node.js built-ins only. Set `TDK_BIN` to the path of a TDK CLI executable if it is not named `tdk` or is not on `PATH`.

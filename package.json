@@ -10,10 +10,14 @@
   "scripts": {
     "start": "node src/cli.js",
     "test": "node --test",
+    "test:browser": "node --test browser-checks/*.mjs",
     "build:mac": "./macos/build.sh",
     "install:mac": "./macos/install.sh"
   },
   "engines": {
     "node": ">=22.12.0"
+  },
+  "devDependencies": {
+    "playwright": "1.64.0"
   }
 }
