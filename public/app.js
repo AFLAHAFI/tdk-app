@@ -903,7 +903,7 @@ function fieldMarkup(field) {
 
 function openForm({ title, intro = "", fields, submit, validate, run }) {
   formDialog.innerHTML = `<form class="form" novalidate>
-    <div class="modal-head"><h2>${esc(title)}</h2><button class="button quiet" type="button" data-close>Close</button></div>
+    <div class="modal-head"><h2 id="form-title">${esc(title)}</h2><button class="button quiet" type="button" data-close>Close</button></div>
     <div class="form-body">${intro ? `<p class="form-intro">${esc(intro)}</p>` : ""}<div class="form-error" role="alert" tabindex="-1" hidden></div>${fields.map(fieldMarkup).join("")}<pre class="form-output" hidden></pre></div>
     <div class="form-foot"><button class="button" type="button" data-close>Cancel</button><button class="button primary" type="submit">${esc(submit)}</button></div></form>`;
   const form = formDialog.querySelector("form");
@@ -1067,7 +1067,7 @@ async function openBuildWithAi() {
   } catch {}
   const links = TDK_INSPECT.providerLinks(prompt).map((link) => `<a class="ai-btn" href="${esc(link.href)}" target="_blank" rel="noreferrer noopener" style="--ai: ${link.color}" title="Open ${esc(link.label)} with the TDK starter prompt"><svg viewBox="0 0 24 24" aria-hidden="true">${link.logo}</svg>${esc(link.label)}</a>`).join("");
   formDialog.innerHTML = `<div class="form">
-    <div class="modal-head"><h2>Build with AI</h2><button class="button quiet" type="button" data-close>Close</button></div>
+    <div class="modal-head"><h2 id="form-title">Build with AI</h2><button class="button quiet" type="button" data-close>Close</button></div>
     <div class="form-body"><p class="form-intro">Pick an AI chat. It opens with a prompt that explains TDK's commands and project layout, then asks what you want to build.</p><div class="ai-row">${links}</div></div>
   </div>`;
   for (const close of formDialog.querySelectorAll("[data-close]")) close.addEventListener("click", () => formDialog.close());
