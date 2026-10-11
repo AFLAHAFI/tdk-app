@@ -867,6 +867,7 @@ setInterval(() => { if (!jobTimer) void pollJobs(); }, 15000);
 const appShell = document.querySelector(".app");
 function applySidebarState() {
   appShell.classList.toggle("rail", collapsed.has("side"));
+  document.querySelector("#side-toggle").setAttribute("aria-expanded", String(!collapsed.has("side")));
   document.querySelector(".sidebar").classList.toggle("ws-collapsed", collapsed.has("ws"));
   document.querySelector("#ws-toggle")?.setAttribute("aria-expanded", String(!collapsed.has("ws")));
 }

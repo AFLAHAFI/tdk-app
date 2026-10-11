@@ -929,8 +929,8 @@
   </head>
   <body>
     <div class="app">
-      <button id="side-toggle" class="side-toggle" type="button" aria-label="Toggle sidebar (Cmd+B)" title="Toggle sidebar (⌘B)"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="M8 3.5v13" stroke="currentColor" stroke-width="1.5"/></svg></button>
-      <aside class="sidebar" aria-label="Project navigation">
+      <button id="side-toggle" class="side-toggle" type="button" aria-label="Toggle sidebar (Cmd+B)" aria-expanded="true" aria-controls="sidebar" title="Toggle sidebar (⌘B)"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="M8 3.5v13" stroke="currentColor" stroke-width="1.5"/></svg></button>
+      <aside id="sidebar" class="sidebar" aria-label="Project navigation">
         <div class="brand"><span class="brand-mark">T</span><span class="brand-name">TDK App</span><span class="local-mark" title="Local session"></span></div>
         <div class="sidebar-tools">
           <label class="search"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="8.8" cy="8.8" r="5.8" stroke="currentColor" stroke-width="1.5"/><path d="m13.2 13.2 4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><input id="search" type="search" placeholder="Filter projects" autocomplete="off" /></label>
