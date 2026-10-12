@@ -260,7 +260,7 @@ function renderOverview() {
   content.innerHTML = `<div class="content-inner">
     <div class="page-head"><div><h1>Projects</h1><p>${projects.length} local workspace${projects.length === 1 ? "" : "s"} discovered across your development folders.</p>${hiddenCount ? `<div class="hidden-note">${hiddenCount} hidden · <button type="button" data-action="toggle-hidden">${showHidden ? "Hide them again" : "Show them"}</button></div>` : ""}</div>
       <div class="head-actions"><button class="button" type="button" data-action="build-with-ai">Build with AI</button><button class="button primary" type="button" data-action="new-project">New project</button></div></div>
-    <div class="narrow-search"><input id="content-search" type="search" placeholder="Filter projects" aria-label="Filter projects" value="${esc(searchTerm)}" autocomplete="off"></div>
+    <div class="narrow-search"><input id="content-search" type="search" title="Filter projects (/)" placeholder="Filter projects" aria-label="Filter projects" value="${esc(searchTerm)}" autocomplete="off"></div>
     ${collapsible("summary", "Summary", `<div class="gauges">${overviewGauges(ready, resources)}</div>${tokenBarMarkup(sumTokens(projects.map((project) => project.tokens)), "Generated share (est.)")}`)}
     ${pinnedResourcesPanel()}
     <div id="notice" class="notice" role="status"></div>
@@ -880,6 +880,33 @@ document.querySelector("#side-toggle").addEventListener("click", () => toggleKey
 document.querySelector("#ws-toggle").addEventListener("click", () => toggleKey("ws"));
 document.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "b") { event.preventDefault(); toggleKey("side"); }
+});
+// Search shortcuts leave editing, composition and open dialogs to their own handlers.
+document.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented || event.isComposing || document.querySelector("dialog[open]")) return;
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  if (event.key === "Escape" && target.matches("#search, #content-search")) {
+    event.preventDefault();
+    if (target.value) {
+      target.value = "";
+      target.dispatchEvent(new Event("input", { bubbles: true }));
+    } else target.blur();
+    return;
+  }
+  if (target.closest("input, textarea, select, [role='textbox'], [role='combobox'], [role='spinbutton']") || target.isContentEditable) return;
+  const slash = event.key === "/" && !event.ctrlKey && !event.metaKey && !event.altKey;
+  const find = event.key.toLowerCase() === "f" && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey;
+  if (!slash && !find) return;
+  const visible = (element) => element && !element.disabled && element.getClientRects().length > 0;
+  let filter = [search, document.querySelector("#content-search")].find(visible);
+  if (!filter && collapsed.has("side")) {
+    toggleKey("side");
+    if (visible(search)) filter = search;
+  }
+  if (!filter) return;
+  filter.focus();
+  if (document.activeElement === filter) event.preventDefault();
 });
 applySidebarState();
 
