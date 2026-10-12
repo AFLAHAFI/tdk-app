@@ -30,7 +30,7 @@ for (const key of ["/", "Control+f", "Meta+f"]) {
     await page.keyboard.press(key);
     await focused("search");
     assert.equal(await page.getByRole("searchbox", { name: "Filter projects", exact: true }).count(), 1);
-    assert.equal(await page.locator("#search").getAttribute("title"), "Filter projects (/)");
+    assert.equal(await page.locator("#search").getAttribute("title"), "Filter projects (/ or Ctrl/Cmd+F)");
   });
 }
 test("collapsed desktop sidebar expands before focusing", async () => {
@@ -73,7 +73,7 @@ test("editable controls retain their shortcuts and focus", async () => {
     for (const key of ["/", "f"]) {
       const result = await page.evaluate((key) => {
         const target = document.activeElement;
-        const event = new KeyboardEvent("keydown", { key, ctrlKey: key === "f", bubbles: true, cancelable: true });
+        const event = new KeyboardEvent("keydown", { key, code: key === "f" ? "KeyF" : "Slash", ctrlKey: key === "f", bubbles: true, cancelable: true });
         target.dispatchEvent(event);
         return { prevented: event.defaultPrevented, retained: document.activeElement === target };
       }, key);
@@ -84,7 +84,7 @@ test("editable controls retain their shortcuts and focus", async () => {
 test("open dialogs do not intercept find or slash", async () => {
   await page.locator("#new-project-nav").click();
   await page.locator("#form-dialog[open]").waitFor();
-  for (const modifiers of [{ key: "/" }, { key: "f", ctrlKey: true }, { key: "f", metaKey: true }]) {
+  for (const modifiers of [{ key: "/", code: "Slash" }, { key: "f", code: "KeyF", ctrlKey: true }, { key: "f", code: "KeyF", metaKey: true }]) {
     assert.equal(await page.evaluate((modifiers) => {
       const event = new KeyboardEvent("keydown", { ...modifiers, bubbles: true, cancelable: true });
       document.querySelector("#form-dialog").dispatchEvent(event);

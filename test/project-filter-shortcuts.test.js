@@ -9,8 +9,8 @@ const source = readFileSync(new URL("../public/app.js", import.meta.url), "utf8"
 const start = source.indexOf('// Search shortcuts leave editing');
 assert.notEqual(start, -1);
 const handlerSource = source.slice(start, source.indexOf('\napplySidebarState();', start));
-function setup({ sidebar = true, narrow = false, collapsed = false, dialog = false } = {}) {
-  const document = { activeElement: null, addEventListener(_type, callback) { this.handler = callback; }, querySelector(selector) { return selector === "dialog[open]" ? dialog : content; } };
+function setup({ sidebar = true, narrow = false, collapsed = false, dialog = false, mobile = false } = {}) {
+  const document = { activeElement: null, addEventListener(_type, callback) { this.handler = callback; }, querySelector(selector) { if (selector === ".sidebar") return sidebarEl; return selector === "dialog[open]" ? dialog : content; } };
   class Element {
     constructor(id = "", visible = true) { this.id = id; this.visible = visible; this.value = ""; this.edits = 0; }
     matches() { return this.id === "search" || this.id === "content-search"; }
@@ -20,7 +20,7 @@ function setup({ sidebar = true, narrow = false, collapsed = false, dialog = fal
     blur() { document.activeElement = null; }
     dispatchEvent(event) { assert.equal(event.type, "input"); this.edits++; }
   }
-  const search = new Element("search", sidebar), content = new Element("content-search", narrow), target = new Element();
+  const search = new Element("search", sidebar), content = new Element("content-search", narrow), sidebarEl = new Element("sidebar", !mobile), target = new Element();
   const state = new Set(collapsed ? ["side"] : []);
   runInNewContext(handlerSource, { document, Element, Event, search, collapsed: state, toggleKey() { state.delete("side"); search.visible = true; } });
   const key = (key, options = {}) => {
@@ -31,7 +31,7 @@ function setup({ sidebar = true, narrow = false, collapsed = false, dialog = fal
   return { document, search, content, target, key, state };
 }
 test("slash and both find modifiers focus and consume the shortcut", () => {
-  for (const [key, options] of [["/", {}], ["f", { ctrlKey: true }], ["f", { metaKey: true }]]) {
+  for (const [key, options] of [["/", {}], ["f", { ctrlKey: true, code: "KeyF" }], ["f", { metaKey: true, code: "KeyF" }], ["а", { ctrlKey: true, code: "KeyF" }]]) {
     const app = setup();
     assert.equal(app.key(key, options).defaultPrevented, true);
     assert.equal(app.document.activeElement, app.search);
@@ -44,6 +44,9 @@ test("uses narrow input or expands a collapsed desktop sidebar", () => {
   const rail = setup({ sidebar: false, collapsed: true });
   rail.key("/"); assert.equal(rail.document.activeElement, rail.search);
   assert.equal(rail.state.has("side"), false);
+  const hidden = setup({ sidebar: false, mobile: true, collapsed: true });
+  hidden.key("/"); assert.equal(hidden.document.activeElement, null);
+  assert.equal(hidden.state.has("side"), true);
 });
 test("Escape clears through the input handler, then blurs", () => {
   for (const id of ["search", "content"]) {
@@ -56,7 +59,7 @@ test("Escape clears through the input handler, then blurs", () => {
 test("editing and open dialogs retain browser shortcuts", () => {
   for (const mode of ["editable", "isContentEditable", "dialog"]) {
     const app = setup({ dialog: mode === "dialog" }); app.target[mode] = true;
-    for (const [key, options] of [["/", {}], ["f", { ctrlKey: true }], ["f", { metaKey: true }]]) {
+    for (const [key, options] of [["/", {}], ["f", { ctrlKey: true, code: "KeyF" }], ["f", { metaKey: true, code: "KeyF" }], ["а", { ctrlKey: true, code: "KeyF" }]]) {
       assert.equal(app.key(key, options).defaultPrevented, undefined);
       assert.equal(app.document.activeElement, null);
     }
@@ -64,7 +67,7 @@ test("editing and open dialogs retain browser shortcuts", () => {
 });
 test("unhandled, modified and composing keys are not consumed", () => {
   const app = setup({ sidebar: false });
-  for (const [key, options] of [["/", {}], ["/", { altKey: true }], ["f", { ctrlKey: true, shiftKey: true }], ["/", { isComposing: true }], ["b", { metaKey: true }]]) {
+  for (const [key, options] of [["/", {}], ["/", { altKey: true }], ["f", { ctrlKey: true, shiftKey: true, code: "KeyF" }], ["/", { isComposing: true }], ["b", { metaKey: true }]]) {
     assert.equal(app.key(key, options).defaultPrevented, undefined);
   }
 });
